@@ -38,7 +38,7 @@ max_depth: u32 = std.math.maxInt(u32) - 1,
 
 pub fn jsonStringify(self: @This(), jw: *std.json.Stringify) error{WriteFailed}!void {
     var visitor = JsonVisitor{ .jw = jw, .tree = self };
-    var xpath_buffer: std.ArrayList(u8) = .{};
+    var xpath_buffer: std.ArrayList(u8) = .empty;
     const listener_targets = interactive.buildListenerTargetMap(self.frame, self.arena) catch |err| {
         log.err(.app, "listener map failed", .{ .err = err });
         return error.WriteFailed;
@@ -182,7 +182,7 @@ fn walk(
     }
 
     const initial_xpath_len = ctx.xpath_buffer.items.len;
-    try appendXPathSegment(node, ctx.xpath_buffer.writer(self.arena), index);
+    try appendXPathSegment(node, ctx.xpath_buffer, self.arena, index);
     const xpath = ctx.xpath_buffer.items;
 
     var name = try axn.getName(self.frame, self.arena);
@@ -258,14 +258,15 @@ fn walk(
         // If we are printing this node normally OR skipping it and unrolling its children,
         // we walk the children iterator.
         var it = node.childrenIterator();
-        var tag_counts = std.StringArrayHashMap(usize).init(self.arena);
+        var tag_counts: std.array_hash_map.String(usize) = .{};
+        defer tag_counts.deinit(self.arena);
         while (it.next()) |child| {
             var tag: []const u8 = "text()";
             if (child.is(Element)) |el| {
                 tag = el.getTagNameLower();
             }
 
-            const gop = try tag_counts.getOrPut(tag);
+            const gop = try tag_counts.getOrPut(self.arena, tag);
             if (!gop.found_existing) {
                 gop.value_ptr.* = 0;
             }
@@ -319,13 +320,14 @@ fn extractDataListOptions(list_id: []const u8, frame: *Frame, arena: std.mem.All
     return null;
 }
 
-fn appendXPathSegment(node: *Node, writer: anytype, index: usize) !void {
-    if (node.is(Element)) |el| {
-        const tag = el.getTagNameLower();
-        try std.fmt.format(writer, "/{s}[{d}]", .{ tag, index });
-    } else if (node.is(CData.Text)) |_| {
-        try std.fmt.format(writer, "/text()[{d}]", .{index});
-    }
+fn appendXPathSegment(node: *Node, buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, index: usize) !void {
+    const segment = if (node.is(Element)) |el|
+        try std.fmt.allocPrint(allocator, "/{s}[{d}]", .{ el.getTagNameLower(), index })
+    else if (node.is(CData.Text)) |_|
+        try std.fmt.allocPrint(allocator, "/text()[{d}]", .{index})
+    else
+        return;
+    try buffer.appendSlice(allocator, segment);
 }
 
 const JsonVisitor = struct {

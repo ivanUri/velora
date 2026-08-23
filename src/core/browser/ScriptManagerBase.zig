@@ -31,13 +31,15 @@ const WorkerGlobalScope = @import("../webapi/WorkerGlobalScope.zig");
 const Element = @import("../dom/Element.zig");
 
 const log = @import("../../support/log.zig");
+const datetime = @import("../../support/datetime.zig");
+const runtime_io = @import("../../support/io.zig");
 const String = @import("../../support/string.zig").String;
 const Allocator = std.mem.Allocator;
 const IS_DEBUG = builtin.mode == .Debug;
 const JS_CALL_LOG_ENV = "KOKO_JS_CALL_LOG";
 
 fn jsCallLogEnabled() bool {
-    const value = std.posix.getenv(JS_CALL_LOG_ENV) orelse return false;
+    const value = runtime_io.getenv(JS_CALL_LOG_ENV) orelse return false;
     return value.len > 0 and !std.mem.eql(u8, value, "0") and !std.mem.eql(u8, value, "false");
 }
 
@@ -331,7 +333,7 @@ pub fn deinit(self: *ScriptManagerBase) void {
     self.reset();
     self.reapOrphanedHttpCtxs();
     self.orphaned_http_ctxs.deinit(self.allocator);
-    self.orphaned_http_ctxs = .{};
+    self.orphaned_http_ctxs = .empty;
 
     self.imported_modules.deinit(self.allocator);
     self.imported_modules = .empty;
@@ -576,7 +578,7 @@ pub fn preloadImport(self: *ScriptManagerBase, url: [:0]const u8, referrer: []co
         .node = .{},
         .manager = self,
         .complete = false,
-        .source = .{ .remote = .{} },
+        .source = .{ .remote = .empty },
         .extra = .import,
         .guard = LoadGuard.Guard.init(&self.owner.jsContext().execution),
     };
@@ -749,7 +751,7 @@ pub fn getAsyncImport(self: *ScriptManagerBase, url: [:0]const u8, cb: ImportAsy
         .node = .{},
         .manager = self,
         .complete = false,
-        .source = .{ .remote = .{} },
+        .source = .{ .remote = .empty },
         .extra = .{ .import_async = .{
             .callback = cb,
             .data = cb_data,
@@ -825,7 +827,7 @@ pub fn getAsyncImport(self: *ScriptManagerBase, url: [:0]const u8, cb: ImportAsy
 pub fn staticScriptsDone(self: *ScriptManagerBase) void {
     assert(self.static_scripts_done == false, "ScriptManagerBase.staticScriptsDone", .{});
     self.static_scripts_done = true;
-    self.static_scripts_done_at_ms = @intCast(@max(std.time.milliTimestamp(), 0));
+    self.static_scripts_done_at_ms = datetime.milliTimestamp(.clock);
     self.queueDeferredEvaluateOnly(0);
 }
 
@@ -1649,7 +1651,7 @@ pub const Script = struct {
             var waited: u64 = 0;
             while (waited < state.deadline_ms * std.time.ns_per_ms) {
                 if (state.cancel.load(.acquire)) return;
-                std.Thread.sleep(step_ns);
+                std.Io.sleep(@import("../../support/io.zig").get(), .fromNanoseconds(step_ns), .awake) catch {};
                 waited += step_ns;
             }
             if (state.cancel.load(.acquire)) return;
@@ -1698,9 +1700,9 @@ pub const Script = struct {
         const cacheable = self.source == .remote;
 
         const url = self.url;
-        const script_started = std.time.nanoTimestamp();
+        const script_started = datetime.nanoTimestamp(.monotonic);
         defer {
-            const elapsed = std.time.nanoTimestamp() - script_started;
+            const elapsed = datetime.nanoTimestamp(.monotonic) - script_started;
             const duration_us: u64 = if (elapsed > 0) @intCast(@divTrunc(elapsed, std.time.ns_per_us)) else 0;
             frame._page.session.browser.observeBrowserScript(duration_us, frame._frame_id, frame._loader_id, url, @tagName(fe.kind));
         }
@@ -1957,7 +1959,7 @@ pub const ModuleSource = struct {
 
 pub const ImportedModule = struct {
     state: State = .loading,
-    buffer: std.ArrayList(u8) = .{},
+    buffer: std.ArrayList(u8) = .empty,
 
     pub const State = union(enum) {
         err,

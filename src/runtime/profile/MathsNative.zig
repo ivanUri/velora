@@ -43,7 +43,7 @@ pub fn installOnContext(context: *js.Context, frame: *Frame) void {
     const math_val = global.get("Math") catch return;
     const math = js.Object{ .local = local, .handle = @ptrCast(math_val.handle) };
 
-    var methods = std.ArrayListUnmanaged([]const u8){};
+    var methods: std.ArrayListUnmanaged([]const u8) = .empty;
     defer methods.deinit(arena);
     for (entries) |entry| {
         var found = false;

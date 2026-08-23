@@ -25,6 +25,8 @@
 //! formatting and parsing.
 
 const std = @import("std");
+const runtime_io = @import("../../../../support/io.zig");
+const net = @import("../../../../support/net.zig");
 const builtin = @import("builtin");
 
 // BoringSSL HMAC — already linked via build.zig (boringssl-zig dep).
@@ -71,7 +73,7 @@ pub const StunError = error{
 pub const BindingResponse = struct {
     transaction_id: [12]u8,
     /// The reflexive (srflx) address observed by the STUN server.
-    mapped_addr: std.net.Address,
+    mapped_addr: net.Address,
 };
 
 // ---------------------------------------------------------------------------
@@ -192,7 +194,7 @@ pub fn parseBindingResponse(data: []const u8) !BindingResponse {
     @memcpy(&tid, data[8..20]);
 
     // Parse attributes
-    var mapped_addr: ?std.net.Address = null;
+    var mapped_addr: ?net.Address = null;
     var offset: usize = 20;
     const end = 20 + msg_len;
 
@@ -275,7 +277,7 @@ pub fn verifyMessageIntegrity(data: []const u8, local_pwd: []const u8) bool {
 /// Generate a random 12-byte STUN transaction ID.
 pub fn randomTransactionId() [12]u8 {
     var tid: [12]u8 = undefined;
-    std.crypto.random.bytes(&tid);
+    runtime_io.get().random(&tid);
     return tid;
 }
 
@@ -290,7 +292,7 @@ fn writeAttr(buf: []u8, pos: usize, attr_type: u16, attr_len: u16) !usize {
     return pos + 4;
 }
 
-fn parseXorMappedAddress(data: []const u8, tid: *const [12]u8) !std.net.Address {
+fn parseXorMappedAddress(data: []const u8, tid: *const [12]u8) !net.Address {
     // Byte 0: reserved, Byte 1: family (0x01=IPv4, 0x02=IPv6)
     if (data.len < 4) return StunError.BadXorMappedAddress;
 
@@ -304,7 +306,7 @@ fn parseXorMappedAddress(data: []const u8, tid: *const [12]u8) !std.net.Address 
         const xaddr = std.mem.readInt(u32, data[4..8], .big);
         const addr = xaddr ^ STUN_MAGIC_COOKIE;
         const bytes: [4]u8 = @bitCast(std.mem.nativeToBig(u32, addr));
-        return std.net.Address.initIp4(bytes, port);
+        return net.Address.initIp4(bytes, port);
     } else if (family == 0x02) {
         // IPv6: 16 bytes
         if (data.len < 20) return StunError.BadXorMappedAddress;
@@ -314,20 +316,20 @@ fn parseXorMappedAddress(data: []const u8, tid: *const [12]u8) !std.net.Address 
         const magic_bytes: [4]u8 = @bitCast(std.mem.nativeToBig(u32, STUN_MAGIC_COOKIE));
         for (0..4) |i| xaddr[i] ^= magic_bytes[i];
         for (0..12) |i| xaddr[4 + i] ^= tid[i];
-        return std.net.Address.initIp6(xaddr, port, 0, 0);
+        return net.Address.initIp6(xaddr, port, 0, 0);
     }
 
     return StunError.BadXorMappedAddress;
 }
 
-fn parseMappedAddress(data: []const u8) !std.net.Address {
+fn parseMappedAddress(data: []const u8) !net.Address {
     if (data.len < 4) return StunError.BadXorMappedAddress;
     const family = data[1];
     const port = std.mem.readInt(u16, data[2..4], .big);
     if (family == 0x01) {
         if (data.len < 8) return StunError.BadXorMappedAddress;
         const bytes: [4]u8 = data[4..8].*;
-        return std.net.Address.initIp4(bytes, port);
+        return net.Address.initIp4(bytes, port);
     }
     return StunError.BadXorMappedAddress;
 }

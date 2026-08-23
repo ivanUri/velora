@@ -308,7 +308,7 @@ fn decodedImageDimensions(self: *const Image, bytes: []const u8) ?ImageDimension
     // SVG document as decoded and use its explicit attributes/default object
     // size. A 2xx response containing arbitrary HTML/JSON is not an image:
     // browsers fire `error` and keep naturalWidth/naturalHeight at zero.
-    const trimmed = std.mem.trimLeft(u8, bytes, " \t\r\n");
+    const trimmed = std.mem.trimStart(u8, bytes, " \t\r\n");
     if (std.mem.startsWith(u8, trimmed, "<svg") or
         (std.mem.startsWith(u8, trimmed, "<?xml") and
             std.mem.indexOf(u8, trimmed[0..@min(trimmed.len, 1024)], "<svg") != null))

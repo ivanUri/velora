@@ -15,7 +15,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const Thread = std.Thread;
+const runtime_io = @import("io.zig");
 const sink = @import("log_sink.zig");
 
 const is_debug = builtin.mode == .Debug;
@@ -56,8 +56,7 @@ const Opts = struct {
 pub var opts = Opts{};
 pub var cdp_trace_enabled: bool = false;
 
-// synchronizes access to last_log
-var last_log_lock: Thread.Mutex = .{};
+var last_log_lock: std.Io.Mutex = .init;
 
 pub fn enabled(comptime scope: Scope, level: Level) bool {
     if (sink.channelEnabled(scope, level, opts.level) == false) {
@@ -151,14 +150,12 @@ pub fn log(comptime scope: Scope, level: Level, comptime msg: []const u8, data: 
     }
 
     {
-        std.debug.lockStdErr();
-        defer std.debug.unlockStdErr();
-
+        const io = runtime_io.get();
         var buf: [4096]u8 = undefined;
-        var stderr = std.fs.File.stderr();
-        var writer = stderr.writer(&buf);
+        var locked_stderr = std.Io.lockStderr(io, &buf, null) catch return;
+        defer std.Io.unlockStderr(io);
 
-        logTo(scope, level, msg, data, &writer.interface) catch |log_err| {
+        logTo(scope, level, msg, data, &locked_stderr.file_writer.interface) catch |log_err| {
             std.debug.print("$time={d} $level=fatal $scope={s} $msg=\"log err\" err={s} log_msg=\"{s}\"\n", .{ timestamp(.clock), @errorName(log_err), @tagName(scope), msg });
         };
     }
@@ -409,8 +406,9 @@ var first_log: u64 = 0;
 fn elapsed() struct { time: f64, unit: []const u8 } {
     const now = timestamp(.monotonic);
 
-    last_log_lock.lock();
-    defer last_log_lock.unlock();
+    const io = runtime_io.get();
+    last_log_lock.lockUncancelable(io);
+    defer last_log_lock.unlock(io);
 
     if (first_log == 0) {
         first_log = now;

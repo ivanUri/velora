@@ -2,6 +2,8 @@ const std = @import("std");
 const Sqlite = @import("Sqlite.zig");
 const model = @import("../Command.zig");
 const log = @import("../../../support/log.zig");
+const runtime_io = @import("../../../support/io.zig");
+const sync = @import("../../../support/sync.zig");
 
 const Allocator = std.mem.Allocator;
 const Store = @This();
@@ -15,10 +17,10 @@ const batch_delay_ns = 5 * std.time.ns_per_ms;
 allocator: Allocator,
 sqlite: Sqlite,
 profile_id: []u8,
-writer_lock: ?std.fs.File,
-mutex: std.Thread.Mutex = .{},
-work_cond: std.Thread.Condition = .{},
-space_cond: std.Thread.Condition = .{},
+writer_lock: ?std.Io.File,
+mutex: sync.Mutex = .{},
+work_cond: sync.Condition = .{},
+space_cond: sync.Condition = .{},
 queue: std.ArrayList(model.Command) = .empty,
 pending_bytes: usize = 0,
 next_sequence: u64 = 1,
@@ -31,7 +33,7 @@ pub fn create(allocator: Allocator, path: ?[:0]const u8, profile_id: []const u8)
     errdefer allocator.destroy(self);
 
     const writer_lock = try acquireWriterLock(allocator, path);
-    errdefer if (writer_lock) |file| file.close();
+    errdefer if (writer_lock) |file| file.close(runtime_io.get());
     var sqlite = try Sqlite.init(allocator, path);
     errdefer sqlite.deinit(allocator);
     const owned_profile_id = try allocator.dupe(u8, profile_id);
@@ -59,7 +61,7 @@ pub fn destroy(self: *Store) void {
     for (self.queue.items) |command| command.deinit(self.allocator);
     self.queue.deinit(self.allocator);
     self.sqlite.deinit(self.allocator);
-    if (self.writer_lock) |file| file.close();
+    if (self.writer_lock) |file| file.close(runtime_io.get());
     self.allocator.free(self.profile_id);
     const allocator = self.allocator;
     allocator.destroy(self);
@@ -183,9 +185,9 @@ fn workerMain(self: *Store) void {
             break;
         }
         if (self.queue.items.len < batch_commands and self.pending_bytes < batch_bytes and !containsBarrier(self.queue.items)) {
-            self.work_cond.timedWait(&self.mutex, batch_delay_ns) catch |err| switch (err) {
-                error.Timeout => {},
-            };
+            self.mutex.unlock();
+            std.Io.sleep(runtime_io.get(), .fromNanoseconds(batch_delay_ns), .awake) catch {};
+            self.mutex.lock();
         }
         batch = self.queue;
         self.queue = .empty;
@@ -220,15 +222,16 @@ fn containsBarrier(commands: []const model.Command) bool {
     return false;
 }
 
-fn acquireWriterLock(allocator: Allocator, path: ?[:0]const u8) !?std.fs.File {
+fn acquireWriterLock(allocator: Allocator, path: ?[:0]const u8) !?std.Io.File {
     const database_path = path orelse return null;
     if (std.mem.eql(u8, database_path, ":memory:")) return null;
-    if (std.fs.path.dirname(database_path)) |parent| try std.fs.cwd().makePath(parent);
+    const io = runtime_io.get();
+    if (std.fs.path.dirname(database_path)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
     const lock_path = try std.fmt.allocPrint(allocator, "{s}.writer.lock", .{database_path});
     defer allocator.free(lock_path);
-    const file = try std.fs.cwd().createFile(lock_path, .{ .truncate = false });
-    errdefer file.close();
-    if (!try file.tryLock(.exclusive)) return error.StorageWriterAlreadyActive;
+    const file = try std.Io.Dir.cwd().createFile(io, lock_path, .{ .truncate = false });
+    errdefer file.close(io);
+    if (!try file.tryLock(io, .exclusive)) return error.StorageWriterAlreadyActive;
     return file;
 }
 
@@ -459,7 +462,7 @@ test "SQLite Store persists browser state across reopen" {
     const testing = std.testing;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const root = try tmp.dir.realPathFileAlloc(runtime_io.get(), ".", testing.allocator);
     defer testing.allocator.free(root);
     const path = try std.fs.path.joinZ(testing.allocator, &.{ root, "state.sqlite" });
     defer testing.allocator.free(path);

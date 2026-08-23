@@ -13,6 +13,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const Timer = @import("../../support/timer.zig");
 const DOMNode = @import("../dom/Node.zig");
 const Element = @import("../dom/Element.zig");
 const Event = @import("../webapi/Event.zig");
@@ -253,7 +254,7 @@ pub fn waitForActionableSelector(
     kind: ActionKind,
     session: *Session,
 ) !*DOMNode {
-    var timer = try std.time.Timer.start();
+    var timer = try Timer.start();
     var runner = try session.runner(.{});
 
     while (true) {

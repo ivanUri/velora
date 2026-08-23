@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const runtime_io = @import("../../support/io.zig");
 
 const App = @import("../App.zig");
 const Config = @import("../Config.zig");
@@ -74,13 +75,14 @@ fn getOrCreateId(app_dir_path_: ?[]const u8) ?[36]u8 {
     };
 
     var buf: [37]u8 = undefined;
-    var dir = std.fs.openDirAbsolute(app_dir_path, .{}) catch |err| {
+    const io = runtime_io.get();
+    const dir = std.Io.Dir.openDirAbsolute(io, app_dir_path, .{}) catch |err| {
         log.warn(.telemetry, "data directory open error", .{ .path = app_dir_path, .err = err });
         return null;
     };
-    defer dir.close();
+    defer dir.close(io);
 
-    const data = dir.readFile(IID_FILE, &buf) catch |err| switch (err) {
+    const data = dir.readFile(io, IID_FILE, &buf) catch |err| switch (err) {
         error.FileNotFound => &.{},
         else => {
             log.warn(.telemetry, "ID read error", .{ .path = app_dir_path, .err = err });
@@ -95,7 +97,7 @@ fn getOrCreateId(app_dir_path_: ?[]const u8) ?[36]u8 {
     }
 
     uuidv4(&id);
-    dir.writeFile(.{ .sub_path = IID_FILE, .data = &id }) catch |err| {
+    dir.writeFile(io, .{ .sub_path = IID_FILE, .data = &id }) catch |err| {
         log.warn(.telemetry, "ID write error", .{ .path = app_dir_path, .err = err });
         return null;
     };
@@ -136,15 +138,15 @@ test "telemetry: product provider is disabled by code configuration" {
 }
 
 test "telemetry: getOrCreateId" {
-    defer std.fs.cwd().deleteFile("/tmp/" ++ IID_FILE) catch {};
+    defer std.Io.Dir.cwd().deleteFile(runtime_io.get(), "/tmp/" ++ IID_FILE) catch {};
 
-    std.fs.cwd().deleteFile("/tmp/" ++ IID_FILE) catch {};
+    std.Io.Dir.cwd().deleteFile(runtime_io.get(), "/tmp/" ++ IID_FILE) catch {};
 
     const id1 = getOrCreateId("/tmp/").?;
     const id2 = getOrCreateId("/tmp/").?;
     try testing.expectEqual(&id1, &id2);
 
-    std.fs.cwd().deleteFile("/tmp/" ++ IID_FILE) catch {};
+    std.Io.Dir.cwd().deleteFile(runtime_io.get(), "/tmp/" ++ IID_FILE) catch {};
     const id3 = getOrCreateId("/tmp/").?;
     try testing.expectEqual(false, std.mem.eql(u8, &id1, &id3));
 
@@ -175,7 +177,7 @@ const MockProvider = struct {
 
     fn init(self: *MockProvider, app: *App, _: ?[36]u8, _: Config.RunMode) !void {
         self.* = .{
-            .events = .{},
+            .events = .empty,
             .allocator = app.allocator,
         };
     }

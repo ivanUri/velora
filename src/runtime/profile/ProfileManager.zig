@@ -1,4 +1,5 @@
 const std = @import("std");
+const runtime_io = @import("../../support/io.zig");
 const ProfilePaths = @import("ProfilePaths.zig");
 const FingerprintStore = @import("FingerprintStore.zig");
 const log = @import("../../support/log.zig");
@@ -72,7 +73,7 @@ pub fn loadLocalState(allocator: Allocator, user_data_dir: []const u8) !LocalSta
     var path_buf: [512]u8 = undefined;
     const path = localStatePath(user_data_dir, &path_buf) orelse return error.PathTooLong;
 
-    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 256 * 1024) catch |err| switch (err) {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(runtime_io.get(), path, allocator, .limited(256 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return try emptyLocalState(allocator),
         else => return err,
     };
@@ -87,14 +88,15 @@ pub fn loadLocalState(allocator: Allocator, user_data_dir: []const u8) !LocalSta
 }
 
 pub fn saveLocalState(allocator: Allocator, user_data_dir: []const u8, state: LocalState) !void {
-    try std.fs.cwd().makePath(user_data_dir);
+    const io = runtime_io.get();
+    try std.Io.Dir.cwd().createDirPath(io, user_data_dir);
     var path_buf: [512]u8 = undefined;
     const path = localStatePath(user_data_dir, &path_buf) orelse return error.PathTooLong;
 
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer file.close(io);
     var buf: [4096]u8 = undefined;
-    var writer = file.writer(&buf);
+    var writer = file.writer(io, &buf);
     try std.json.Stringify.value(state, .{}, &writer.interface);
     try writer.interface.writeByte('\n');
     try writer.end();
@@ -108,11 +110,12 @@ pub fn discoverProfiles(allocator: Allocator, user_data_dir: []const u8) ![][]co
         names.deinit(allocator);
     }
 
-    var dir = try std.fs.cwd().openDir(user_data_dir, .{ .iterate = true });
-    defer dir.close();
+    const io = runtime_io.get();
+    var dir = try std.Io.Dir.cwd().openDir(io, user_data_dir, .{ .iterate = true });
+    defer dir.close(io);
 
     var it = dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (entry.kind != .directory) continue;
         if (entry.name[0] == '.') continue;
         if (!isValidProfileName(entry.name)) continue;
@@ -207,7 +210,7 @@ pub fn fingerprintExists(id: []const u8) !bool {
 }
 
 fn fileExists(path: []const u8) !bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    std.Io.Dir.cwd().access(runtime_io.get(), path, .{}) catch return false;
     return true;
 }
 
@@ -228,8 +231,9 @@ pub fn createProfile(
 
     if (try fileExists(prefs_path)) return error.ProfileAlreadyExists;
 
-    try std.fs.cwd().makePath(paths.user_data_dir);
-    try std.fs.cwd().makePath(paths.profile_dir);
+    const io = runtime_io.get();
+    try std.Io.Dir.cwd().createDirPath(io, paths.user_data_dir);
+    try std.Io.Dir.cwd().createDirPath(io, paths.profile_dir);
     try writePreferences(prefs_path, .{
         .version = 3,
         .name = name,
@@ -249,7 +253,7 @@ pub fn deleteProfile(allocator: Allocator, user_data_dir: []const u8, name: []co
     var paths = try ProfilePaths.ProfilePaths.init(allocator, user_data_dir, name, null);
     defer paths.deinit();
 
-    try std.fs.cwd().deleteTree(paths.profile_dir);
+    try std.Io.Dir.cwd().deleteTree(runtime_io.get(), paths.profile_dir);
 
     var state = try syncLocalState(allocator, user_data_dir);
     defer freeLocalState(allocator, &state);
@@ -297,8 +301,9 @@ pub fn importCookies(
     const cookies_path = try paths.cookiesPathAlloc();
     defer allocator.free(cookies_path);
 
-    try std.fs.cwd().makePath(paths.profile_dir);
-    try std.fs.cwd().copyFile(from_path, std.fs.cwd(), cookies_path, .{});
+    const io = runtime_io.get();
+    try std.Io.Dir.cwd().createDirPath(io, paths.profile_dir);
+    try std.Io.Dir.cwd().copyFile(from_path, .cwd(), cookies_path, io, .{});
 
     var state = try syncLocalState(allocator, user_data_dir);
     defer freeLocalState(allocator, &state);
@@ -343,7 +348,7 @@ pub fn freeProfileEntries(allocator: Allocator, entries: []ProfileEntry) void {
 }
 
 pub fn ensureFirstRun(allocator: Allocator, user_data_dir: []const u8) !void {
-    try std.fs.cwd().makePath(user_data_dir);
+    try std.Io.Dir.cwd().createDirPath(runtime_io.get(), user_data_dir);
     if (!try fingerprintExists("koko")) return;
 
     var default_paths = try ProfilePaths.ProfilePaths.init(allocator, user_data_dir, ProfilePaths.default_profile_name, null);
@@ -355,10 +360,11 @@ pub fn ensureFirstRun(allocator: Allocator, user_data_dir: []const u8) !void {
 }
 
 fn writePreferences(path: []const u8, prefs: ProfilePaths.Preferences) !void {
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
+    const io = runtime_io.get();
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer file.close(io);
     var buf: [1024]u8 = undefined;
-    var writer = file.writer(&buf);
+    var writer = file.writer(io, &buf);
     try std.json.Stringify.value(.{
         .version = 3,
         .name = prefs.name,

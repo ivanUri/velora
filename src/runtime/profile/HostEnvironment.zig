@@ -6,6 +6,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
 const Profile = @import("Profile.zig");
+const runtime_io = @import("../../support/io.zig");
 
 pub const Screen = struct {
     width: u32,
@@ -120,14 +121,15 @@ fn readSysctlString(allocator: std.mem.Allocator, name: [*:0]const u8) !?[]const
     defer allocator.free(buf);
     if (c.sysctlbyname(name, buf.ptr, &size, null, 0) != 0) return null;
 
-    const trimmed = std.mem.trimRight(u8, buf[0..size], "\x00");
+    const trimmed = std.mem.trimEnd(u8, buf[0..size], "\x00");
     if (trimmed.len == 0) return null;
     return try allocator.dupe(u8, trimmed);
 }
 
 fn readMacosTimezone(allocator: std.mem.Allocator) !?[]const u8 {
     var buf: [512]u8 = undefined;
-    const path = std.posix.readlink("/etc/localtime", &buf) catch return null;
+    const path_len = std.Io.Dir.readLinkAbsolute(runtime_io.get(), "/etc/localtime", &buf) catch return null;
+    const path = buf[0..path_len];
 
     const prefixes = [_][]const u8{
         "/var/db/timezone/zoneinfo/",

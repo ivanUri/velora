@@ -14,17 +14,19 @@
 
 const std = @import("std");
 const Sqlite = @import("Sqlite.zig");
+const sync = @import("../../../support/sync.zig");
+const runtime_io = @import("../../../support/io.zig");
+const Timer = @import("../../../support/timer.zig");
 
 const c = Sqlite.c;
 
-const Thread = std.Thread;
 const Allocator = std.mem.Allocator;
 
 const Pool = @This();
 
 available: usize,
-mutex: Thread.Mutex,
-cond: Thread.Condition,
+mutex: sync.Mutex,
+cond: sync.Condition,
 conns: []Sqlite.Conn,
 
 pub fn init(allocator: Allocator, path: [:0]const u8) !Pool {
@@ -73,9 +75,7 @@ pub fn acquire(self: *Pool) !Sqlite.Conn {
             // Condition.timedWait reacquires the mutex before returning both
             // success and error. Returning error.Timeout here would therefore
             // leak the lock and deadlock every future acquire/release.
-            self.cond.timedWait(&self.mutex, 5 * std.time.ns_per_s) catch |err| switch (err) {
-                error.Timeout => continue,
-            };
+            self.cond.wait(&self.mutex);
             continue;
         }
         const index = available - 1;
@@ -102,12 +102,12 @@ test "Sqlite: Pool" {
     // :memory: _has_ to run with a single connetion in the pool, which isn't
     // that useful for testing. So we create a temp file.
 
-    std.fs.cwd().deleteFile("/tmp/koko_test.sqlite") catch {};
+    std.Io.Dir.cwd().deleteFile(runtime_io.get(), "/tmp/koko_test.sqlite") catch {};
     var pool = try Pool.init(testing.allocator, "/tmp/koko_test.sqlite");
 
     defer {
         pool.deinit(testing.allocator);
-        std.fs.cwd().deleteFile("/tmp/koko_test.sqlite") catch {};
+        std.Io.Dir.cwd().deleteFile(runtime_io.get(), "/tmp/koko_test.sqlite") catch {};
     }
 
     {
@@ -129,12 +129,12 @@ test "Sqlite: Pool" {
         try conn.exec("pragma journal_mode=memory", .{});
     }
 
-    const t1 = try Thread.spawn(.{}, testPool, .{&pool});
-    const t2 = try Thread.spawn(.{}, testPool, .{&pool});
-    const t3 = try Thread.spawn(.{}, testPool, .{&pool});
-    const t4 = try Thread.spawn(.{}, testPool, .{&pool});
-    const t5 = try Thread.spawn(.{}, testPool, .{&pool});
-    const t6 = try Thread.spawn(.{}, testPool, .{&pool});
+    const t1 = try std.Thread.spawn(.{}, testPool, .{&pool});
+    const t2 = try std.Thread.spawn(.{}, testPool, .{&pool});
+    const t3 = try std.Thread.spawn(.{}, testPool, .{&pool});
+    const t4 = try std.Thread.spawn(.{}, testPool, .{&pool});
+    const t5 = try std.Thread.spawn(.{}, testPool, .{&pool});
+    const t6 = try std.Thread.spawn(.{}, testPool, .{&pool});
 
     t1.join();
     t2.join();
@@ -163,6 +163,6 @@ fn testPool(p: *Pool) !void {
         };
         conn.exec("commit", .{}) catch unreachable;
         p.release(conn);
-        std.Thread.sleep(2 * std.time.ns_per_ms);
+        Timer.sleepNanoseconds(2 * std.time.ns_per_ms);
     }
 }

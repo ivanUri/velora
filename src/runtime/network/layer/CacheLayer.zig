@@ -13,6 +13,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const datetime = @import("../../../support/datetime.zig");
+const runtime_io = @import("../../../support/io.zig");
 const log = @import("../../../support/log.zig");
 
 const http = @import("../http.zig");
@@ -66,7 +68,7 @@ fn request(ptr: *anyopaque, client: *Client, req: Request) anyerror!void {
 
     const cache_req: CacheRequest = .{
         .url = req.params.url,
-        .timestamp = std.time.timestamp(),
+        .timestamp = @intCast(datetime.timestamp(.clock)),
         .request_headers = req_header_list.items,
     };
 
@@ -100,8 +102,8 @@ fn requestHasClientValidators(cache_req: CacheRequest) bool {
 
 fn closeCachedData(data: *const CachedData) void {
     switch (data.*) {
-        .buffer => |_| {},
-        .file => |f| f.file.close(),
+        .buffer => {},
+        .file => |f| f.file.close(runtime_io.get()),
     }
 }
 
@@ -191,7 +193,7 @@ fn duplicateCachedData(arena: std.mem.Allocator, data: CachedData) !CachedData {
         .file => |f| blk: {
             const file = f.file;
             var read_buf: [1024]u8 = undefined;
-            var file_reader = file.reader(&read_buf);
+            var file_reader = file.reader(runtime_io.get(), &read_buf);
             try file_reader.seekTo(f.offset);
             const body = try file_reader.interface.readAlloc(arena, f.len);
             break :blk .{ .buffer = body };
@@ -202,8 +204,8 @@ fn duplicateCachedData(arena: std.mem.Allocator, data: CachedData) !CachedData {
 fn serveFromCache(req: Request, cached: *const CachedResponse) !void {
     const response = Response.fromCached(req.ctx, cached);
     defer switch (cached.data) {
-        .buffer => |_| {},
-        .file => |f| f.file.close(),
+        .buffer => {},
+        .file => |f| f.file.close(runtime_io.get()),
     };
 
     if (req.start_callback) |cb| {
@@ -224,7 +226,7 @@ fn serveFromCache(req: Request, cached: *const CachedResponse) !void {
         .file => |f| {
             const file = f.file;
             var buf: [1024]u8 = undefined;
-            var file_reader = file.reader(&buf);
+            var file_reader = file.reader(runtime_io.get(), &buf);
             try file_reader.seekTo(f.offset);
             const reader = &file_reader.interface;
             var read_buf: [1024]u8 = undefined;
@@ -278,7 +280,7 @@ const CacheContext = struct {
                     return self.forward.forwardHeader(response);
                 });
 
-                stale_meta.stored_at = std.time.timestamp();
+                stale_meta.stored_at = @intCast(datetime.timestamp(.clock));
                 if (transfer._conn) |conn| {
                     if (conn.getResponseHeader("age", 0)) |h| {
                         stale_meta.age_at_store = std.fmt.parseInt(u64, h.value, 10) catch 0;
@@ -327,7 +329,7 @@ const CacheContext = struct {
                             log.warn(.http, "cache put failed", .{ .err = err });
                         };
                     },
-                    .file => |_| {},
+                    .file => {},
                 }
 
                 if (self.expose_304_status) {
@@ -352,7 +354,7 @@ const CacheContext = struct {
                             try self.forward.data(cached_response, data);
                         }
                     },
-                    .file => |_| {},
+                    .file => {},
                 }
 
                 self.served_stale = true;
@@ -371,7 +373,7 @@ const CacheContext = struct {
 
         const maybe_cm = try Cache.tryCache(
             allocator,
-            std.time.timestamp(),
+            @intCast(datetime.timestamp(.clock)),
             transfer.url,
             rh.status,
             rh.contentType(),

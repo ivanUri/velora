@@ -150,7 +150,7 @@ pub fn addFromElement(self: *ScriptManager, comptime from_parser: bool, script_e
             source = .{ .@"inline" = data_uri };
         } else {
             remote_url = try URL.resolve(arena, base_url, src, .{ .encoding = frame.charset });
-            source = .{ .remote = .{} };
+            source = .{ .remote = .empty };
         }
     } else {
         var buf = std.Io.Writer.Allocating.init(arena);
@@ -379,7 +379,7 @@ fn parseDataURI(allocator: Allocator, src: []const u8) !?[]const u8 {
             stripped.appendAssumeCapacity(c);
         }
     }
-    const trimmed = std.mem.trimRight(u8, stripped.items, "=");
+    const trimmed = std.mem.trimEnd(u8, stripped.items, "=");
 
     // Length % 4 == 1 is invalid
     if (trimmed.len % 4 == 1) {

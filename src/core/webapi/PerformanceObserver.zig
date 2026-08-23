@@ -45,7 +45,7 @@ pub fn init(callback: js.Function.Global, frame: *Frame) !*PerformanceObserver {
         ._callback = callback,
         ._duration_threshold = DefaultDurationThreshold,
         ._interests = 0,
-        ._entries = .{},
+        ._entries = .empty,
     });
 }
 

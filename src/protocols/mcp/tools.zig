@@ -1137,7 +1137,7 @@ const testing = @import("../../testing/testing.zig");
 
 test "MCP - evaluate error reporting" {
     defer testing.reset();
-    var out: std.io.Writer.Allocating = .init(testing.arena_allocator);
+    var out: std.Io.Writer.Allocating = .init(testing.arena_allocator);
     const server = try testLoadPage("about:blank", &out.writer);
     defer server.deinit();
 
@@ -1166,7 +1166,7 @@ test "MCP - evaluate error reporting" {
 
 test "MCP - native structured extract" {
     defer testing.reset();
-    var out: std.io.Writer.Allocating = .init(testing.arena_allocator);
+    var out: std.Io.Writer.Allocating = .init(testing.arena_allocator);
     const server = try testLoadPage(
         "http://localhost:9582/src/browser/tests/mcp_extract.html",
         &out.writer,
@@ -1184,7 +1184,7 @@ test "MCP - native structured extract" {
 
 test "MCP - action recording exports only successful replayable operations" {
     defer testing.reset();
-    var out: std.io.Writer.Allocating = .init(testing.arena_allocator);
+    var out: std.Io.Writer.Allocating = .init(testing.arena_allocator);
     const server = try testLoadPage(
         "http://localhost:9582/src/browser/tests/mcp_extract.html",
         &out.writer,
@@ -1219,7 +1219,7 @@ test "MCP - action recording exports only successful replayable operations" {
 
 test "MCP - deterministic workflow replay runs without a model" {
     defer testing.reset();
-    var out: std.io.Writer.Allocating = .init(testing.arena_allocator);
+    var out: std.Io.Writer.Allocating = .init(testing.arena_allocator);
     const server = try Server.init(testing.allocator, testing.test_app, &out.writer);
     defer server.deinit();
 
@@ -1235,7 +1235,7 @@ test "MCP - Actions: click, fill, scroll, hover, press, selectOption, setChecked
     defer testing.reset();
     const aa = testing.arena_allocator;
 
-    var out: std.io.Writer.Allocating = .init(aa);
+    var out: std.Io.Writer.Allocating = .init(aa);
     const server = try testLoadPage("http://localhost:9582/src/browser/tests/mcp_actions.html", &out.writer);
     defer server.deinit();
 
@@ -1379,7 +1379,7 @@ test "MCP - findElement" {
     defer testing.reset();
     const aa = testing.arena_allocator;
 
-    var out: std.io.Writer.Allocating = .init(aa);
+    var out: std.Io.Writer.Allocating = .init(aa);
     const server = try testLoadPage("http://localhost:9582/src/browser/tests/mcp_actions.html", &out.writer);
     defer server.deinit();
 
@@ -1426,7 +1426,7 @@ test "MCP - findElement" {
 
 test "MCP - waitForSelector: existing element" {
     defer testing.reset();
-    var out: std.io.Writer.Allocating = .init(testing.arena_allocator);
+    var out: std.Io.Writer.Allocating = .init(testing.arena_allocator);
     const server = try testLoadPage(
         "http://localhost:9582/src/browser/tests/mcp_wait_for_selector.html",
         &out.writer,
@@ -1444,7 +1444,7 @@ test "MCP - waitForSelector: existing element" {
 
 test "MCP - waitForSelector: delayed element" {
     defer testing.reset();
-    var out: std.io.Writer.Allocating = .init(testing.arena_allocator);
+    var out: std.Io.Writer.Allocating = .init(testing.arena_allocator);
     const server = try testLoadPage(
         "http://localhost:9582/src/browser/tests/mcp_wait_for_selector.html",
         &out.writer,
@@ -1462,7 +1462,7 @@ test "MCP - waitForSelector: delayed element" {
 
 test "MCP - waitForSelector: timeout" {
     defer testing.reset();
-    var out: std.io.Writer.Allocating = .init(testing.arena_allocator);
+    var out: std.Io.Writer.Allocating = .init(testing.arena_allocator);
     const server = try testLoadPage(
         "http://localhost:9582/src/browser/tests/mcp_wait_for_selector.html",
         &out.writer,

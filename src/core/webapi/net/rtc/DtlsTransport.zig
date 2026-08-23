@@ -27,14 +27,14 @@
 //! SCTP runs directly over DTLS (draft-ietf-mmusic-sctp-sdp).
 
 const std = @import("std");
-const posix = std.posix;
+const posix = @import("../../../../support/posix.zig");
 const Allocator = std.mem.Allocator;
 
 const log = @import("../../../../support/log.zig");
 const RtcEventQueue = @import("../../../../runtime/network/RtcEventQueue.zig");
 
 const ssl_c = @cImport({
-    @cInclude("openssl/ssl.h");
+    @cInclude("boringssl_zig_compat.h");
     @cInclude("openssl/bio.h");
     @cInclude("openssl/x509.h");
     @cInclude("openssl/evp.h");

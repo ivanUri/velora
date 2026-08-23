@@ -178,7 +178,7 @@ pub const CacheRequest = struct {
 pub const CachedData = union(enum) {
     buffer: []const u8,
     file: struct {
-        file: std.fs.File,
+        file: std.Io.File,
         offset: usize,
         len: usize,
     },

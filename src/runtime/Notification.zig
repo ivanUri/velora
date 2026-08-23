@@ -248,7 +248,7 @@ pub fn init(allocator: Allocator) !*Notification {
         .listeners = .{},
         .event_listeners = .{},
         .allocator = allocator,
-        .mem_pool = std.heap.MemoryPool(Listener).init(allocator),
+        .mem_pool = .empty,
     };
 
     return notification;
@@ -262,14 +262,14 @@ pub fn deinit(self: *Notification) void {
         listener.deinit(allocator);
     }
     self.listeners.deinit(allocator);
-    self.mem_pool.deinit();
+    self.mem_pool.deinit(self.allocator);
     allocator.destroy(self);
 }
 
 pub fn register(self: *Notification, comptime event: EventType, receiver: anytype, func: EventFunc(event)) !void {
     var list = &@field(self.event_listeners, @tagName(event));
 
-    var listener = try self.mem_pool.create();
+    var listener = try self.mem_pool.create(self.allocator);
     errdefer self.mem_pool.destroy(listener);
 
     listener.* = .{
@@ -284,7 +284,7 @@ pub fn register(self: *Notification, comptime event: EventType, receiver: anytyp
     const allocator = self.allocator;
     const gop = try self.listeners.getOrPut(allocator, @intFromPtr(receiver));
     if (gop.found_existing == false) {
-        gop.value_ptr.* = .{};
+        gop.value_ptr.* = .empty;
     }
     try gop.value_ptr.append(allocator, listener);
 

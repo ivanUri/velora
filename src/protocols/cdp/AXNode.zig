@@ -867,7 +867,7 @@ fn writeName(
 
     return switch (node._type) {
         .document => |doc| switch (doc._type) {
-            .html => |_| {
+            .html => {
                 try w.write(try doc.getTitle(frame));
                 return .title;
             },
@@ -1353,7 +1353,7 @@ test "AXnode: stripWhitespaces" {
         .{ .value = "\"foo\"", .expected = "\\\"foo\\\"" },
     };
 
-    var buffer = std.io.Writer.Allocating.init(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
     defer buffer.deinit();
 
     for (test_cases) |test_case| {

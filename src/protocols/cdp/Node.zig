@@ -44,7 +44,7 @@ pub const Registry = struct {
             .lookup_by_node = .{},
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
-            .node_pool = std.heap.MemoryPool(Node).init(allocator),
+            .node_pool = .empty,
         };
     }
 
@@ -52,7 +52,7 @@ pub const Registry = struct {
         const allocator = self.allocator;
         self.lookup_by_id.deinit(allocator);
         self.lookup_by_node.deinit(allocator);
-        self.node_pool.deinit();
+        self.node_pool.deinit(self.allocator);
         self.arena.deinit();
     }
 
@@ -60,7 +60,7 @@ pub const Registry = struct {
         self.lookup_by_id.clearRetainingCapacity();
         self.lookup_by_node.clearRetainingCapacity();
         _ = self.arena.reset(.{ .retain_with_limit = 1024 });
-        _ = self.node_pool.reset(.{ .retain_with_limit = 1024 });
+        _ = self.node_pool.reset(self.allocator, .{ .retain_with_limit = 1024 });
     }
 
     pub fn register(self: *Registry, dom_node: *DOMNode) !*Node {
@@ -73,7 +73,7 @@ pub const Registry = struct {
         // but, just in case, let's try to keep things tidy.
         errdefer _ = self.lookup_by_node.remove(dom_node);
 
-        const node = try self.node_pool.create();
+        const node = try self.node_pool.create(self.allocator);
         errdefer self.node_pool.destroy(node);
 
         const id = self.node_id;
@@ -119,7 +119,7 @@ pub const Search = struct {
         search_id: u16 = 0,
         registry: *Registry,
         arena: std.heap.ArenaAllocator,
-        searches: std.ArrayList(Search) = .{},
+        searches: std.ArrayList(Search) = .empty,
 
         pub fn init(allocator: Allocator, registry: *Registry) List {
             return .{
@@ -134,7 +134,7 @@ pub const Search = struct {
 
         pub fn reset(self: *List) void {
             self.search_id = 0;
-            self.searches = .{};
+            self.searches = .empty;
             _ = self.arena.reset(.{ .retain_with_limit = 4096 });
         }
 

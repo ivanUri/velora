@@ -13,6 +13,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const runtime_io = @import("../../support/io.zig");
+const datetime = @import("../../support/datetime.zig");
 const crypto = @import("../../support/sys/libcrypto.zig");
 
 const Http = @import("../network/http.zig");
@@ -61,7 +63,7 @@ fn signEd25519(pkey: *crypto.EVP_PKEY, message: []const u8, out: *[64]u8) !void 
 }
 
 pub fn fromConfig(allocator: std.mem.Allocator, config: *const Config) !WebBotAuth {
-    const pem = try std.fs.cwd().readFileAlloc(allocator, config.key_file, 1024 * 4);
+    const pem = try std.Io.Dir.cwd().readFileAlloc(runtime_io.get(), config.key_file, allocator, .limited(1024 * 4));
     defer allocator.free(pem);
 
     const pkey = try parsePemPrivateKey(pem);
@@ -89,7 +91,7 @@ pub fn signRequest(
     headers: *Http.Headers,
     authority: []const u8,
 ) !void {
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
     const expires = now + 60;
 
     // build the signature-input value (without the sig1= label)

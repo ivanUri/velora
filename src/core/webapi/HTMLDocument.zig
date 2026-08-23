@@ -12,6 +12,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const datetime = @import("../../support/datetime.zig");
 const js = @import("../js/js.zig");
 
 const Frame = @import("../browser/Frame.zig");
@@ -279,14 +280,14 @@ pub fn getCookie(self: *HTMLDocument) ![]const u8 {
     const doc = self.asDocument();
     const doc_frame = doc.activeBrowsingContext() orelse return "";
     const cookie_url = doc_frame.cookieURL();
-    var buf: std.ArrayList(u8) = .empty;
-    try doc_frame._session.cookie_jar.forRequest(cookie_url, buf.writer(doc_frame.call_arena), .{
+    var buf = std.Io.Writer.Allocating.init(doc_frame.call_arena);
+    try doc_frame._session.cookie_jar.forRequest(cookie_url, &buf.writer, .{
         .is_http = false,
         .is_navigation = true,
         .origin_url = cookie_url,
         .top_level_url = doc_frame.topLevelUrl(),
     });
-    return buf.items;
+    return buf.written();
 }
 
 pub fn setCookie(self: *HTMLDocument, cookie_str: []const u8) ![]const u8 {
@@ -308,7 +309,7 @@ pub fn setCookie(self: *HTMLDocument, cookie_str: []const u8) ![]const u8 {
         c.deinit();
         return ""; // HttpOnly cookies cannot be set from JS
     }
-    try doc_frame._session.cookie_jar.addWithTopLevel(c, std.time.timestamp(), false, doc_frame.topLevelUrl());
+    try doc_frame._session.cookie_jar.addWithTopLevel(c, @intCast(datetime.timestamp(.clock)), false, doc_frame.topLevelUrl());
     return cookie_str;
 }
 

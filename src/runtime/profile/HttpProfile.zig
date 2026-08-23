@@ -134,7 +134,9 @@ fn appendFullVersionListHeader(
         const sep = if (i == 0) " " else ", ";
         try list.appendSlice(allocator, sep);
         const full_ver = try brandFullVersion(allocator, brand, ua_full_version);
-        try list.writer(allocator).print("\"{s}\";v=\"{s}\"", .{ brand.brand, full_ver });
+        const rendered = try std.fmt.allocPrint(allocator, "\"{s}\";v=\"{s}\"", .{ brand.brand, full_ver });
+        defer allocator.free(rendered);
+        try list.appendSlice(allocator, rendered);
     }
     try list.append(allocator, 0);
     const slice = try list.toOwnedSlice(allocator);

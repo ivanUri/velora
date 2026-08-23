@@ -1,4 +1,5 @@
 const std = @import("std");
+const runtime_io = @import("../../../support/io.zig");
 
 const js = @import("../../js/js.zig");
 const TaggedOpaque = @import("../../js/TaggedOpaque.zig");
@@ -77,7 +78,7 @@ pub fn materialize(body_val: ?js.Value, exec: *const Execution) !Materialized {
 
 fn generateBoundary(allocator: Allocator) ![]const u8 {
     var bytes: [16]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
+    runtime_io.get().random(&bytes);
     var hex: [32]u8 = undefined;
     _ = std.fmt.bufPrint(&hex, "{s}", .{std.fmt.bytesToHex(&bytes, .lower)}) catch unreachable;
     return try std.fmt.allocPrint(allocator, "----kokoboundary{s}", .{hex});

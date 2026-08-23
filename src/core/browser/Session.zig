@@ -12,6 +12,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const datetime = @import("../../support/datetime.zig");
 const assert = @import("../../support/assert.zig").assert;
 const builtin = @import("builtin");
 
@@ -81,10 +82,10 @@ _pending_root_nav_retries: u8 = 0,
 
 // Discarded pending pages waiting for in-flight document transfers whose
 // req.ctx still aliases the frame. Reaped from HttpClient after transfer.deinit.
-_zombie_pending_pages: std.ArrayList(*Page) = .{},
+_zombie_pending_pages: std.ArrayList(*Page) = .empty,
 
 /// Active/pending pages deferred until native WebSocket `pollNative` unwinds.
-_zombie_pages: std.ArrayList(*Page) = .{},
+_zombie_pages: std.ArrayList(*Page) = .empty,
 
 // True when a pending root navigation's headers arrived inside a
 // reentrant HttpClient.perform (e.g. JS on the active page called fetch();
@@ -134,11 +135,11 @@ pub fn init(self: *Session, browser: *Browser, notification: *Notification) !voi
         .storage_shed = .{},
         .browser = browser,
         .notification = notification,
-        .fc_identity_pool = .init(allocator),
+        .fc_identity_pool = .empty,
         .cookie_jar = storage.Cookie.Jar.init(allocator),
         .fingerprint_seed = FingerprintSeed.sessionSeed(
             browser.app.config.profile.id,
-            @intCast(std.time.nanoTimestamp()),
+            @intCast(datetime.nanoTimestamp(.monotonic)),
         ),
     };
     self.enableProfilePersistence();
@@ -159,15 +160,31 @@ pub fn clientHintsEnabledForUrl(self: *const Session, allocator: Allocator, url:
 }
 
 pub fn deinit(self: *Session) void {
+    // A page can be deferred as a zombie while a native WebSocket poll still
+    // aliases its Frame. Session teardown is the final owner boundary, so
+    // cancel those frame-attributed transports and drain their abort callbacks
+    // before touching Page/V8 state. Finishing a zombie while curl still has
+    // the frame on its callback stack is a direct UAF/SIGSEGV path on sites
+    // with long-lived WebSockets (for example Tinhte).
+    for (self._zombie_pages.items) |zombie| {
+        self.browser.http_client.abortTransfersAttributedTo(&zombie.frame, .{ .scope = .full });
+    }
+    for (self._zombie_pending_pages.items) |zombie| {
+        self.browser.http_client.abortTransfersAttributedTo(&zombie.frame, .{ .scope = .full });
+    }
+    if (self._zombie_pages.items.len > 0 or self._zombie_pending_pages.items.len > 0) {
+        _ = self.browser.http_client.tick(0) catch {};
+    }
+
     for (self._zombie_pages.items) |zombie| {
         self.finishDestroyPage(zombie);
     }
-    self._zombie_pages = .{};
+    self._zombie_pages = .empty;
 
     for (self._zombie_pending_pages.items) |zombie| {
         self.finishDestroyPage(zombie);
     }
-    self._zombie_pending_pages = .{};
+    self._zombie_pending_pages = .empty;
 
     if (self._pending != null) {
         self.discardPendingPage();
@@ -203,7 +220,7 @@ pub fn deinit(self: *Session) void {
     // this pool back V8 weak-callback parameters; freeing the pool first
     // would leave dangling pointers that segfault on the next GC.
     self.browser.env.memoryPressureNotification(.critical);
-    self.fc_identity_pool.deinit();
+    self.fc_identity_pool.deinit(self.browser.app.allocator);
 
     // storage_shed and all Lookup contents use the session arena. Reset the
     // root before returning that arena to the pool; freeing entries through the
@@ -367,9 +384,27 @@ pub fn hasPage(self: *const Session) bool {
     return self._active != null;
 }
 
+/// BrowserContext disposal may be requested immediately after Target.closeTarget,
+/// while curl still has a callback or native WebSocket poll referring to a
+/// retired Page. Only release the Session once every page/transfer alias is
+/// gone; the CDP tick loop will retry this predicate after draining I/O.
+pub fn canDisposeContext(self: *const Session) bool {
+    if (self._active != null or self._pending != null) return false;
+    for (self._zombie_pages.items) |page| {
+        const frame_ctx: *const anyopaque = &page.frame;
+        if (self.browser.http_client.frameHasWebSocketPollInFlight(@constCast(frame_ctx)) or
+            self.browser.http_client.hasLiveTransferWithCtx(frame_ctx)) return false;
+    }
+    for (self._zombie_pending_pages.items) |page| {
+        const frame_ctx: *const anyopaque = &page.frame;
+        if (self.browser.http_client.hasLiveTransferWithCtx(frame_ctx)) return false;
+    }
+    return true;
+}
+
 // Allocate and initialize a Page.
 fn allocatePage(self: *Session, frame_id: u32) !*Page {
-    const page = try self.browser.page_pool.create();
+    const page = try self.browser.page_pool.create(self.browser.allocator);
     errdefer self.browser.page_pool.destroy(page);
 
     try Page.init(page, self, frame_id);
@@ -1171,7 +1206,7 @@ fn destroySharedWorkersOwnedBy(self: *Session, page: *Page) void {
     if (self._shared_workers.count() == 0) return;
 
     // Runtime.destroy mutates the registry, so snapshot matching values first.
-    var owned: std.ArrayList(*SharedWorkerRuntime) = .{};
+    var owned: std.ArrayList(*SharedWorkerRuntime) = .empty;
     var it = self._shared_workers.valueIterator();
     while (it.next()) |runtime| {
         if (runtime.*.owner_page == page) {
@@ -1189,7 +1224,7 @@ fn destroySharedWorkersOwnedBy(self: *Session, page: *Page) void {
 
 fn destroySharedWorkers(self: *Session) void {
     if (self._shared_workers.count() == 0) return;
-    var list: std.ArrayList(*SharedWorkerRuntime) = .{};
+    var list: std.ArrayList(*SharedWorkerRuntime) = .empty;
     var it = self._shared_workers.valueIterator();
     while (it.next()) |runtime| {
         list.append(self.arena, runtime.*) catch {};

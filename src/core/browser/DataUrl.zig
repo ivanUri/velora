@@ -36,7 +36,7 @@ pub fn decodeBody(allocator: Allocator, url: []const u8) ![]const u8 {
     for (body) |byte| {
         if (!std.ascii.isWhitespace(byte)) compact.appendAssumeCapacity(byte);
     }
-    const unpadded = std.mem.trimRight(u8, compact.items, "=");
+    const unpadded = std.mem.trimEnd(u8, compact.items, "=");
     if (unpadded.len % 4 == 1) return error.InvalidDataUrl;
 
     const decoded_len = std.base64.standard_no_pad.Decoder

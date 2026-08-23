@@ -1,5 +1,6 @@
 const std = @import("std");
 const ProfileStore = @import("ProfileStore.zig");
+const runtime_io = @import("../../support/io.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -208,12 +209,7 @@ fn hostMatchesSuffix(host: []const u8, suffix: []const u8) bool {
 }
 
 fn readPolicyFile(allocator: Allocator, path: []const u8) ![]const u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const stat = try file.stat();
-    const bytes = try allocator.alloc(u8, stat.size);
-    _ = try file.readAll(bytes);
-    return bytes;
+    return std.Io.Dir.cwd().readFileAlloc(runtime_io.get(), path, allocator, .unlimited);
 }
 
 const JsonInjectParam = struct {

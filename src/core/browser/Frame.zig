@@ -67,6 +67,7 @@ const NavigatorState = @import("../webapi/NavigatorState.zig");
 
 const timestamp = @import("../../support/datetime.zig").timestamp;
 const milliTimestamp = @import("../../support/datetime.zig").milliTimestamp;
+const nanoTimestamp = @import("../../support/datetime.zig").nanoTimestamp;
 
 const WebApiURL = @import("../webapi/URL.zig");
 const GlobalEventHandlersLookup = @import("../webapi/global_event_handlers.zig").Lookup;
@@ -227,20 +228,20 @@ _blob_urls: std.StringHashMapUnmanaged(*Blob) = .{},
 /// A call to `documentIsComplete` (which calls `_documentIsComplete`) resets it.
 /// Double-buffered so that dispatching load events (which may trigger JS that
 /// creates new elements) doesn't invalidate the list while iterating.
-_to_load_1: std.ArrayList(QueuedElementLoad) = .{},
-_to_load_2: std.ArrayList(QueuedElementLoad) = .{},
+_to_load_1: std.ArrayList(QueuedElementLoad) = .empty,
+_to_load_2: std.ArrayList(QueuedElementLoad) = .empty,
 _to_load: *std.ArrayList(QueuedElementLoad) = undefined,
 
 // iframe `load` events deferred to the next macrotask so sibling inline
 
-_iframe_load_1: std.ArrayList(*IFrame) = .{},
-_iframe_load_2: std.ArrayList(*IFrame) = .{},
+_iframe_load_1: std.ArrayList(*IFrame) = .empty,
+_iframe_load_2: std.ArrayList(*IFrame) = .empty,
 _iframe_load: *std.ArrayList(*IFrame) = undefined,
 _iframe_load_scheduled: bool = false,
 
 // about:blank iframe loads queued during appendChild; flushed before returning to JS.
-_sync_iframe_pending_1: std.ArrayList(*IFrame) = .{},
-_sync_iframe_pending_2: std.ArrayList(*IFrame) = .{},
+_sync_iframe_pending_1: std.ArrayList(*IFrame) = .empty,
+_sync_iframe_pending_2: std.ArrayList(*IFrame) = .empty,
 _sync_iframe_pending: *std.ArrayList(*IFrame) = undefined,
 _sync_iframe_flush_scheduled: bool = false,
 /// HTML parse + static scripts deferred off the document HTTP done_callback (CDP poll).
@@ -248,7 +249,7 @@ _document_parse_scheduled: bool = false,
 /// Images marked `loading="lazy"` are collected while the document is parsed.
 /// Koko has no compositor viewport, so they are activated on a later scheduler
 /// turn after the document's load event instead of being fetched eagerly.
-_deferred_lazy_images: std.ArrayList(*Element.Html.Image) = .{},
+_deferred_lazy_images: std.ArrayList(*Element.Html.Image) = .empty,
 _lazy_images_activation_scheduled: bool = false,
 /// True while `DeferDocumentParseCallback` is on the stack (html5ever walking DOM).
 /// Parser callbacks re-check realm after CDP poll; this flag is for diagnostics
@@ -277,7 +278,7 @@ _suppress_dom_mutation_microtasks: bool = false,
 _mutation_delivery_depth: u32 = 0,
 
 // List of active IntersectionObservers
-_intersection_observers: std.ArrayList(*IntersectionObserver) = .{},
+_intersection_observers: std.ArrayList(*IntersectionObserver) = .empty,
 _intersection_check_scheduled: bool = false,
 _intersection_delivery_scheduled: bool = false,
 
@@ -301,7 +302,7 @@ _slotchange_delivery_task_owner: RealmLifecycleKernel.TaskOwner = .{ .realm_id =
 _nav_task_owner: RealmLifecycleKernel.TaskOwner = .{ .realm_id = 0, .epoch = 0, .document_id = null },
 /// List of active PerformanceObservers.
 /// Contrary to MutationObserver and IntersectionObserver, these are regular tasks.
-_performance_observers: std.ArrayList(*PerformanceObserver) = .{},
+_performance_observers: std.ArrayList(*PerformanceObserver) = .empty,
 _performance_delivery_scheduled: bool = false,
 
 _speech_voices_ready: bool = false,
@@ -317,7 +318,7 @@ _offline_audio_flush_queued: bool = false,
 _trusted_types_mapping: ?JS.Value.Global = null,
 
 /// Active RTCPeerConnection instances owned by this frame.
-_rtc_peer_connections: std.ArrayList(*@import("../webapi/rtc_bindings.zig").RTCPeerConnectionJs) = .{},
+_rtc_peer_connections: std.ArrayList(*@import("../webapi/rtc_bindings.zig").RTCPeerConnectionJs) = .empty,
 
 // Lookup for customized built-in elements. Maps element pointer to definition.
 _customized_builtin_definitions: std.AutoHashMapUnmanaged(*Element, *CustomElementDefinition) = .{},
@@ -329,7 +330,7 @@ _customized_builtin_disconnected_callback_invoked: std.AutoHashMapUnmanaged(*Ele
 _upgrading_element: ?*Node = null,
 
 // List of custom elements that were created before their definition was registered
-_undefined_custom_elements: std.ArrayList(*Element.Html.Custom) = .{},
+_undefined_custom_elements: std.ArrayList(*Element.Html.Custom) = .empty,
 
 // for heap allocations and managing WebAPI objects
 _factory: *Factory,
@@ -389,10 +390,10 @@ document: *Document,
 iframe: ?*IFrame = null,
 
 child_frames_sorted: bool = true,
-child_frames: std.ArrayList(*Frame) = .{},
+child_frames: std.ArrayList(*Frame) = .empty,
 
 // Workers created by this frame. Cleaned up when frame is destroyed.
-workers: std.ArrayList(*Worker) = .{},
+workers: std.ArrayList(*Worker) = .empty,
 
 // Press-half state for split CDP mouse press/release sequences.
 _input_press_hit: ?InputHit = null,
@@ -850,7 +851,7 @@ pub fn runOwnedSchedulerOne(self: *Frame) !bool {
         }
         return false;
     }
-    const started = std.time.nanoTimestamp();
+    const started = nanoTimestamp(.monotonic);
     const ran = try self.js.scheduler.runOne();
     if (ran) self.observeBrowserStage("event-loop", elapsedMicros(started), "measured", "Renderer", "Main");
     return ran;
@@ -965,7 +966,14 @@ pub fn deinit(self: *Frame) void {
             }
         }
 
-        for (self._intersection_observers.items) |observer| {
+        // Detach the registry before releasing its owner references. A V8
+        // finalizer may run synchronously from releaseRef; leaving the list
+        // populated until after that callback would retain a stale observer
+        // pointer for the next shutdown/navigation pass.
+        const intersection_observers = self._intersection_observers.items;
+        self._intersection_observers.clearRetainingCapacity();
+        for (intersection_observers) |observer| {
+            observer._registered_frame = null;
             observer.releaseRef(page);
         }
 
@@ -1172,7 +1180,7 @@ const ImagePreloadWaiter = struct {
 const ImagePreloadEntry = struct {
     state: enum { loading, complete } = .loading,
     result: ImagePreloadResult = .{ .ok = false, .probe = &.{} },
-    waiters: std.ArrayListUnmanaged(ImagePreloadWaiter) = .{},
+    waiters: std.ArrayListUnmanaged(ImagePreloadWaiter) = .empty,
 };
 
 pub const ImagePreloadUse = enum {
@@ -1249,7 +1257,7 @@ pub fn completeImagePreload(self: *Frame, key: []const u8, ok: bool, probe: []co
     entry.state = .complete;
 
     const waiters = entry.waiters.items;
-    entry.waiters = .{};
+    entry.waiters = .empty;
     for (waiters) |waiter| {
         waiter.callback(waiter.ctx, entry.result) catch |err| {
             log.warn(.browser, "image preload consumer", .{ .err = err });
@@ -1691,6 +1699,18 @@ fn swapActiveDocument(self: *Frame) !void {
 
 pub fn navigate(self: *Frame, request_url: [:0]const u8, opts: NavigateOpts) !void {
     assert(self._load_state == .waiting, "frame.renavigate", .{});
+
+    // `javascript:` iframe sources are executable URLs, not HTTP resources.
+    // Ad widgets commonly use them to run a parent-frame callback while
+    // creating an otherwise blank iframe. They must not reach curl (which
+    // reports CURLE_URL_MALFORMAT); leave the child at its initial blank
+    // document until executable-URL navigation is implemented here.
+    if (isJavascriptUrl(request_url)) {
+        if (self.iframe != null) {
+            return self.navigate("about:blank", opts);
+        }
+        return;
+    }
     const session = self._session;
     try self.swapActiveDocument();
     session.cookie_jar.beginDocumentNavigation();
@@ -2001,6 +2021,9 @@ pub fn scheduleNavigation(self: *Frame, request_url: []const u8, opts: NavigateO
     if (self._unload_running or self.isUnloadRunningInChain()) {
         return;
     }
+    // Executable URLs do not create a network navigation. In particular,
+    // ignore iframe src updates instead of queuing an invalid curl transfer.
+    if (isJavascriptUrl(request_url)) return;
     // about:srcdoc is only valid via the srcdoc="" attribute path — never
     // via location / window.open targeting (network-error → opaque page).
     if (isAboutSrcdocNavigationUrl(request_url) and
@@ -2027,6 +2050,11 @@ fn isAboutSrcdocNavigationUrl(url: []const u8) bool {
     if (!std.mem.startsWith(u8, url, "about:srcdoc")) return false;
     if (url.len == "about:srcdoc".len) return true;
     return url["about:srcdoc".len] == '?' or url["about:srcdoc".len] == '#';
+}
+
+fn isJavascriptUrl(url: []const u8) bool {
+    return url.len >= "javascript:".len and
+        std.ascii.eqlIgnoreCase(url[0.."javascript:".len], "javascript:");
 }
 
 fn isSameDocumentAboutSrcdocUrl(current: []const u8, requested: []const u8) bool {
@@ -2365,7 +2393,7 @@ pub fn pollCdpDuringLongWork(self: *Frame) void {
 /// HTTP transfer callback (defer head fetches deadlock until curl unwinds).
 pub fn runPostParseScriptLifecycle(self: *Frame) void {
     if (self._script_manager.base.static_scripts_done) return;
-    const started = std.time.nanoTimestamp();
+    const started = nanoTimestamp(.monotonic);
     defer self.observeBrowserStage("javascript", elapsedMicros(started), "measured", "Renderer", "Main");
     self._static_scripts_done_scheduled = false;
     // Activate style/link/img that were skipped mid-document-parse.
@@ -2426,7 +2454,7 @@ fn activateDeferredLazyImages(self: *Frame) void {
     // callbacks may create more lazy images; those belong to a subsequent
     // activation pass and cannot invalidate this iteration.
     const pending = self._deferred_lazy_images;
-    self._deferred_lazy_images = .{};
+    self._deferred_lazy_images = .empty;
     for (pending.items) |image| {
         if (!navDeliverable(self)) return;
         image.activateDeferredLoad(self) catch |err| {
@@ -4080,7 +4108,7 @@ pub fn layoutResolveActive(self: *const Frame) bool {
 }
 
 pub fn beginLayoutResolve(self: *Frame) void {
-    if (self._layout_resolve_depth == 0) self._layout_observation_start_ns = std.time.nanoTimestamp();
+    if (self._layout_resolve_depth == 0) self._layout_observation_start_ns = nanoTimestamp(.monotonic);
     self._layout_resolve_depth +%= 1;
 }
 
@@ -4093,7 +4121,7 @@ pub fn endLayoutResolve(self: *Frame) void {
 }
 
 fn elapsedMicros(started: i128) u64 {
-    const elapsed = std.time.nanoTimestamp() - started;
+    const elapsed = nanoTimestamp(.monotonic) - started;
     if (elapsed <= 0) return 0;
     return @intCast(@divTrunc(elapsed, std.time.ns_per_us));
 }
@@ -4319,13 +4347,30 @@ pub fn unregisterMutationObserver(self: *Frame, observer: *MutationObserver) voi
 
 pub fn registerIntersectionObserver(self: *Frame, observer: *IntersectionObserver) !void {
     observer.acquireRef();
+    observer._registered_frame = self;
     try self._intersection_observers.append(self.arena, observer);
 }
 
 pub fn unregisterIntersectionObserver(self: *Frame, observer: *IntersectionObserver) void {
+    // Clear the back-reference even if the registry entry was already
+    // detached by frame teardown. This keeps observer.deinit from walking a
+    // frame whose registry no longer owns it.
+    if (observer._registered_frame == self) observer._registered_frame = null;
     for (self._intersection_observers.items, 0..) |obs, i| {
         if (obs == observer) {
             observer.releaseRef(self._page);
+            _ = self._intersection_observers.swapRemove(i);
+            return;
+        }
+    }
+}
+
+/// Remove a registry entry without releasing the observer. Used by the
+/// observer's terminal deinit path when the final V8 reference is released
+/// after the frame-side registration has already become stale.
+pub fn detachIntersectionObserver(self: *Frame, observer: *IntersectionObserver) void {
+    for (self._intersection_observers.items, 0..) |obs, i| {
+        if (obs == observer) {
             _ = self._intersection_observers.swapRemove(i);
             return;
         }
@@ -7545,7 +7590,7 @@ test "Frame: static module wait exits when V8 execution is terminated" {
 
     const Terminator = struct {
         fn run(env: *JS.Env) void {
-            std.Thread.sleep(25 * std.time.ns_per_ms);
+            @import("../../support/timer.zig").sleepNanoseconds(25 * std.time.ns_per_ms);
             env.terminate();
         }
     };
@@ -7625,6 +7670,10 @@ test "Frame: IntersectionObserver delivery stops after callback detaches its rea
 
 test "Frame: parser document.write preserves synchronous insertion ordering" {
     try testing.htmlRunner("regression/document_write_parser_reentrancy.html", .{});
+}
+
+test "Frame: javascript iframe sources do not enter HTTP navigation" {
+    try testing.htmlRunner("regression/iframe_javascript_src.html", .{});
 }
 
 test "Frame: stale iframe Document markup APIs cannot mutate a replacement realm" {

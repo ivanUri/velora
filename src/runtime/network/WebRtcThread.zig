@@ -39,7 +39,10 @@
 //!   - All three are created/destroyed on the WebRTC thread
 
 const std = @import("std");
-const posix = std.posix;
+const net = @import("../../support/net.zig");
+const posix = @import("../../support/posix.zig");
+const runtime_io = @import("../../support/io.zig");
+const datetime = @import("../../support/datetime.zig");
 const Allocator = std.mem.Allocator;
 
 const log = @import("../../support/log.zig");
@@ -57,7 +60,7 @@ const WebRtcThread = @This();
 // ---------------------------------------------------------------------------
 
 pub const Config = struct {
-    stun_server: ?std.net.Address = null,
+    stun_server: ?net.Address = null,
     sctp_local_port: u16 = 5000,
     sctp_remote_port: u16 = 5000,
     /// ICE role (offerer = controlling)
@@ -82,7 +85,7 @@ _dtls: DtlsTransport,
 _sctp: ?*SctpTransport,
 
 // Peer address (set when ICE nominates a pair)
-_peer_addr: ?std.net.Address,
+_peer_addr: ?net.Address,
 _peer_sockaddr: posix.sockaddr.storage,
 _peer_sockaddr_len: posix.socklen_t,
 
@@ -284,7 +287,7 @@ fn drainUdp(self: *WebRtcThread, now_ms: u64) !void {
 
         if (n == 0) break;
         const data = buf[0..n];
-        const from_addr = std.net.Address.initPosix(@ptrCast(@alignCast(&from)));
+        const from_addr = net.Address.initPosix(@ptrCast(@alignCast(&from)));
 
         // Try ICE (STUN demux)
         const consumed_by_ice = self._ice.handleIncoming(data, from_addr, now_ms) catch false;
@@ -495,7 +498,7 @@ fn parsedCandidateToIce(pc: SdpParser.ParsedCandidate) ?IceAgent.Candidate {
     // Only handle UDP candidates for now
     if (!std.ascii.eqlIgnoreCase(pc.transport, "UDP")) return null;
 
-    const addr = std.net.Address.parseIp(pc.address, pc.port) catch return null;
+    const addr = net.Address.parseIp(pc.address, pc.port) catch return null;
 
     const typ: IceAgent.CandidateType = blk: {
         if (std.mem.eql(u8, pc.typ, "host")) break :blk .host;
@@ -509,8 +512,8 @@ fn parsedCandidateToIce(pc: SdpParser.ParsedCandidate) ?IceAgent.Candidate {
     const fl = @min(pc.foundation.len, 32);
     @memcpy(foundation[0..fl], pc.foundation[0..fl]);
 
-    const related_addr: ?std.net.Address = if (pc.related_address) |ra|
-        std.net.Address.parseIp(ra, pc.related_port orelse 0) catch null
+    const related_addr: ?net.Address = if (pc.related_address) |ra|
+        net.Address.parseIp(ra, pc.related_port orelse 0) catch null
     else
         null;
 
@@ -533,11 +536,12 @@ fn allocStreamId(self: *WebRtcThread) u16 {
 
 fn genIceCredentials(ufrag: *[8]u8, pwd: *[24]u8) void {
     const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/";
-    var rng = std.crypto.random;
-    for (ufrag) |*b| b.* = chars[rng.uintLessThan(u8, chars.len)];
-    for (pwd) |*b| b.* = chars[rng.uintLessThan(u8, chars.len)];
+    runtime_io.get().random(ufrag);
+    runtime_io.get().random(pwd);
+    for (ufrag) |*b| b.* = chars[b.* % chars.len];
+    for (pwd) |*b| b.* = chars[b.* % chars.len];
 }
 
 fn monoMs() u64 {
-    return @intCast(std.time.milliTimestamp());
+    return datetime.milliTimestamp(.monotonic);
 }

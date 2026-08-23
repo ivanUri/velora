@@ -12,6 +12,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const sync = @import("../../support/sync.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -60,7 +61,7 @@ page_pool: std.heap.MemoryPool(Page),
 
 // Serializes CDP-driven browser ticks. Multiple CDP WebSocket threads must not
 // run HttpClient.perform / V8 macrotasks concurrently on the same session.
-tick_mutex: std.Thread.Mutex = .{},
+tick_mutex: sync.Mutex = .{},
 
 // Host-owned cancellation is durable across V8 execution scopes. V8's
 // TerminateExecution flag is intentionally transient: script watchdogs may
@@ -110,7 +111,7 @@ pub fn init(self: *Browser, app: *App, opts: InitOpts, cdp_client: ?HttpClient.C
         .arena_pool = &app.arena_pool,
         .http_client = undefined,
         .battery_config = opts.battery_config,
-        .page_pool = std.heap.MemoryPool(Page).init(allocator),
+        .page_pool = .empty,
     };
     try self.http_client.init(allocator, &app.network, cdp_client);
     self.http_client.env = &self.env;
@@ -125,7 +126,7 @@ pub fn deinit(self: *Browser) void {
     self.http_client.abort();
     self.closeSession();
     self.env.deinit();
-    self.page_pool.deinit();
+    self.page_pool.deinit(self.allocator);
     self.http_client.deinit();
 }
 

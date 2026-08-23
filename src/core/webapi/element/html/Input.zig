@@ -168,7 +168,8 @@ pub fn setValue(self: *Input, value: []const u8, frame: *Frame) !void {
     // and domain keystrokes insert *before* the local-part
     // (outlook.comstevenmiller…@ on signup.live.com).
     if (self.selectionAvailable()) {
-        const len: u32 = @intCast((self._value orelse "").len);
+        const current_value: []const u8 = self._value orelse &.{};
+        const len: u32 = @intCast(current_value.len);
         self._selection_start = len;
         self._selection_end = len;
         self._selection_direction = .none;

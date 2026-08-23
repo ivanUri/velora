@@ -76,7 +76,7 @@ pub fn parseList(arena: Allocator, input: []const u8) ParseError![]const Selecto
 
     var remaining = preprocessed;
     while (true) {
-        const trimmed = std.mem.trimLeft(u8, remaining, &std.ascii.whitespace);
+        const trimmed = std.mem.trimStart(u8, remaining, &std.ascii.whitespace);
         if (trimmed.len == 0) break;
 
         var comma_pos: usize = trimmed.len;
@@ -131,7 +131,7 @@ pub fn parseList(arena: Allocator, input: []const u8) ParseError![]const Selecto
             }
         }
 
-        const selector_input = std.mem.trimRight(u8, trimmed[0..comma_pos], &std.ascii.whitespace);
+        const selector_input = std.mem.trimEnd(u8, trimmed[0..comma_pos], &std.ascii.whitespace);
 
         if (selector_input.len > 0) {
             const selector = try parse(arena, selector_input);
@@ -322,7 +322,7 @@ fn isStartOfPart(c: u8) bool {
 
 // Returns true if there's more input after trimming whitespace
 fn skipSpaces(self: *Parser) bool {
-    const trimmed = std.mem.trimLeft(u8, self.input, &std.ascii.whitespace);
+    const trimmed = std.mem.trimStart(u8, self.input, &std.ascii.whitespace);
     self.input = trimmed;
     return trimmed.len > 0;
 }
@@ -330,7 +330,7 @@ fn skipSpaces(self: *Parser) bool {
 // Returns true if whitespace was actually removed
 fn skipSpacesConsumed(self: *Parser) bool {
     const original_len = self.input.len;
-    const trimmed = std.mem.trimLeft(u8, self.input, &std.ascii.whitespace);
+    const trimmed = std.mem.trimStart(u8, self.input, &std.ascii.whitespace);
     self.input = trimmed;
     return trimmed.len < original_len;
 }

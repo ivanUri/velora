@@ -13,6 +13,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const runtime_io = @import("../support/io.zig");
 
 const Config = @import("Config.zig");
 const Snapshot = @import("../core/js/Snapshot.zig");
@@ -112,12 +114,22 @@ fn getAndMakeAppDir(allocator: Allocator) ?[]const u8 {
     if (@import("builtin").is_test) {
         return allocator.dupe(u8, "/tmp") catch unreachable;
     }
-    const app_dir_path = std.fs.getAppDataDir(allocator, "koko") catch |err| {
+    const base = switch (builtin.os.tag) {
+        .macos => runtime_io.getenv("HOME"),
+        .windows => runtime_io.getenv("LOCALAPPDATA"),
+        else => runtime_io.getenv("XDG_DATA_HOME") orelse runtime_io.getenv("HOME"),
+    } orelse return null;
+    const suffix = switch (builtin.os.tag) {
+        .macos => "Library/Application Support/koko",
+        .windows => "koko",
+        else => if (runtime_io.getenv("XDG_DATA_HOME") != null) "koko" else ".local/share/koko",
+    };
+    const app_dir_path = std.fs.path.join(allocator, &.{ base, suffix }) catch |err| {
         log.warn(.app, "get data dir", .{ .err = err });
         return null;
     };
 
-    std.fs.cwd().makePath(app_dir_path) catch |err| switch (err) {
+    std.Io.Dir.cwd().createDirPath(runtime_io.get(), app_dir_path) catch |err| switch (err) {
         error.PathAlreadyExists => return app_dir_path,
         else => {
             allocator.free(app_dir_path);

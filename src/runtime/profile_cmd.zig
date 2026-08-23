@@ -2,6 +2,7 @@ const std = @import("std");
 const BrowserRoot = @import("profile/BrowserRoot.zig");
 const ProfileManager = @import("profile/ProfileManager.zig");
 const ProfilePaths = @import("profile/ProfilePaths.zig");
+const runtime_io = @import("../support/io.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -116,14 +117,17 @@ fn runBundleScript(allocator: Allocator, args: []const []const u8, out_path: ?[]
         try argv.append(allocator, out);
     }
 
-    var child = std.process.Child.init(argv.items, std.heap.page_allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    try child.spawn();
-    const term = try child.wait();
+    const io = runtime_io.get();
+    var child = try std.process.spawn(io, .{
+        .argv = argv.items,
+        .stdin = .ignore,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    defer child.kill(io);
+    const term = try child.wait(io);
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) return error.BundleScriptFailed;
         },
         else => return error.BundleScriptFailed,
@@ -149,11 +153,11 @@ fn runList(allocator: Allocator, user_data_dir: []const u8) !void {
 }
 
 fn defaultUserDataDir(allocator: Allocator) ![]const u8 {
-    return std.fs.getAppDataDir(allocator, "koko") catch try allocator.dupe(u8, ".koko-user-data");
+    return ProfilePaths.defaultUserDataDir(allocator);
 }
 
 fn printUsage() !void {
-    var stdout = std.fs.File.stdout().writer(&.{});
+    var stdout = std.Io.File.stdout().writerStreaming(runtime_io.get(), &.{});
     try stdout.interface.writeAll(
         \\profile commands:
         \\  koko profile list

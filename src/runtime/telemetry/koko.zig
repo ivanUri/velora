@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../../support/sync.zig");
 const builtin = @import("builtin");
 const build_config = @import("build_config");
 
@@ -21,7 +22,7 @@ network: *Network,
 writer: std.Io.Writer.Allocating,
 
 /// Protects concurrent producers in send().
-mutex: std.Thread.Mutex = .{},
+mutex: sync.Mutex = .{},
 
 iid: ?[36]u8 = null,
 run_mode: Config.RunMode = .serve,

@@ -13,11 +13,13 @@
 
 const std = @import("std");
 const URL = @import("../core/browser/URL.zig");
+const WaitGroup = @import("../support/wait_group.zig");
+const runtime_io = @import("../support/io.zig");
 
 const TestHTTPServer = @This();
 
 shutdown: std.atomic.Value(bool),
-listener: ?std.net.Server,
+listener: ?std.Io.net.Server,
 handler: Handler,
 
 const Handler = *const fn (req: *std.http.Server.Request) anyerror!void;
@@ -37,24 +39,24 @@ pub fn deinit(self: *TestHTTPServer) void {
 pub fn stop(self: *TestHTTPServer) void {
     self.shutdown.store(true, .release);
     if (self.listener) |*listener| {
-        switch (@import("builtin").target.os.tag) {
-            .linux => std.posix.shutdown(listener.stream.handle, .recv) catch {},
-            else => std.posix.close(listener.stream.handle),
-        }
+        listener.socket.close(runtime_io.get());
     }
 }
 
-pub fn run(self: *TestHTTPServer, wg: *std.Thread.WaitGroup) !void {
-    const address = try std.net.Address.parseIp("127.0.0.1", 9582);
+pub fn run(self: *TestHTTPServer, wg: *WaitGroup) !void {
+    var ready = false;
+    defer if (!ready) wg.finish();
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 9582);
 
-    self.listener = try address.listen(.{ .reuse_address = true });
+    self.listener = try address.listen(runtime_io.get(), .{ .reuse_address = true });
     var listener = &self.listener.?;
     self.shutdown.store(false, .release);
 
     wg.finish();
+    ready = true;
 
     while (true) {
-        const conn = listener.accept() catch |err| {
+        const conn = listener.accept(runtime_io.get()) catch |err| {
             if (self.shutdown.load(.acquire) or err == error.SocketNotListening) {
                 return;
             }
@@ -65,14 +67,15 @@ pub fn run(self: *TestHTTPServer, wg: *std.Thread.WaitGroup) !void {
     }
 }
 
-fn handleConnection(self: *TestHTTPServer, conn: std.net.Server.Connection) !void {
-    defer conn.stream.close();
+fn handleConnection(self: *TestHTTPServer, conn: std.Io.net.Stream) !void {
+    defer conn.close(runtime_io.get());
 
     var req_buf: [2048]u8 = undefined;
-    var conn_reader = conn.stream.reader(&req_buf);
-    var conn_writer = conn.stream.writer(&req_buf);
+    var write_buf: [2048]u8 = undefined;
+    var conn_reader = conn.reader(runtime_io.get(), &req_buf);
+    var conn_writer = conn.writer(runtime_io.get(), &write_buf);
 
-    var http_server = std.http.Server.init(conn_reader.interface(), &conn_writer.interface);
+    var http_server = std.http.Server.init(&conn_reader.interface, &conn_writer.interface);
 
     while (true) {
         var req = http_server.receiveHead() catch |err| switch (err) {
@@ -96,13 +99,14 @@ pub fn sendFile(req: *std.http.Server.Request, file_path: []const u8) !void {
     var url_buf: [1024]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&url_buf);
     const unescaped_file_path = try URL.unescape(fba.allocator(), file_path);
-    var file = std.fs.cwd().openFile(unescaped_file_path, .{}) catch |err| switch (err) {
+    const io = runtime_io.get();
+    var file = std.Io.Dir.cwd().openFile(io, unescaped_file_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return req.respond("server error", .{ .status = .not_found }),
         else => return err,
     };
-    defer file.close();
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     var send_buffer: [4096]u8 = undefined;
 
     var res = try req.respondStreaming(&send_buffer, .{
@@ -115,7 +119,7 @@ pub fn sendFile(req: *std.http.Server.Request, file_path: []const u8) !void {
     });
 
     var read_buffer: [4096]u8 = undefined;
-    var reader = file.reader(&read_buffer);
+    var reader = file.reader(io, &read_buffer);
     _ = try res.writer.sendFileAll(&reader, .unlimited);
     try res.writer.flush();
     try res.end();

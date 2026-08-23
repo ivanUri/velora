@@ -201,7 +201,7 @@ pub fn toDataURL(
                     return url;
                 }
             },
-            .webgl2 => |_| {
+            .webgl2 => {
                 const WebGLIntelligent = @import("../../../../runtime/profile/WebGLIntelligent.zig");
                 if (WebGLIntelligent.dataUrlBaseline(frame, w, h, true)) |url| {
                     return url;

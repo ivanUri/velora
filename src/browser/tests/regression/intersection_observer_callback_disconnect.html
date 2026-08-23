@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<body>
+  <div id="sentinel" style="width:10px;height:10px"></div>
+</body>
+<script>
+let observer;
+observer = new IntersectionObserver(() => {
+  // A callback may tear down its observer synchronously. The dispatch itself
+  // must keep the observer alive until the callback returns.
+  observer.disconnect();
+  document.body.id = "pass";
+});
+observer.observe(document.getElementById("sentinel"));
+
+window.testing = {
+  assertOk: () => document.body.id === "pass",
+  printTimeoutState: () => document.body.id,
+};
+</script>

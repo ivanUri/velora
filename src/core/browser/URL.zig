@@ -13,6 +13,12 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+
+fn appendPrint(list: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime format: []const u8, args: anytype) !void {
+    const text = try std.fmt.allocPrint(allocator, format, args);
+    defer allocator.free(text);
+    try list.appendSlice(allocator, text);
+}
 const idna = @import("../../support/sys/idna.zig");
 
 const Allocator = std.mem.Allocator;
@@ -864,7 +870,7 @@ fn parseIpv6AddressBytes(input: []const u8) ?[16]u8 {
     if (input.len > 0 and input[input.len - 1] == ':' and
         (input.len < 2 or input[input.len - 2] != ':'))
         return null;
-    if (std.net.Ip6Address.parse(input, 0)) |ip6| return ip6.sa.addr else |_| {}
+    if (std.Io.net.Ip6Address.parse(input, 0)) |ip6| return ip6.bytes else |_| {}
 
     var pieces: [8]u16 = .{0} ** 8;
     var piece_index: usize = 0;
@@ -962,7 +968,7 @@ fn formatIpv6Canonical(allocator: Allocator, inner: []const u8) ![]const u8 {
             continue;
         }
         if (abbrv) abbrv = false;
-        try buf.writer(allocator).print("{x}", .{parts[i]});
+        try appendPrint(&buf, allocator, "{x}", .{parts[i]});
         if (i != parts.len - 1) try buf.append(allocator, ':');
     }
     return buf.items;
@@ -1290,7 +1296,7 @@ fn percentEncodeSegment(allocator: Allocator, segment: []const u8, comptime enco
         }
 
         if (shouldPercentEncode(c, encode_set)) {
-            try buf.writer(allocator).print("%{X:0>2}", .{c});
+            try appendPrint(&buf, allocator, "%{X:0>2}", .{c});
         } else {
             try buf.append(allocator, c);
         }

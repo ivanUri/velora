@@ -20,16 +20,14 @@ const M = @This();
 // German-string (small string optimization)
 pub const String = packed struct {
     len: i32,
-    payload: packed union {
-        // Zig won't let you put an array in a packed struct/union. But it will
-        // let you put a vector.
-        content: @Vector(12, u8),
-        heap: packed struct { prefix: @Vector(4, u8), ptr: [*]const u8 },
+    payload: packed union(u96) {
+        content: u96,
+        heap: packed struct(u96) { prefix: u32, ptr: usize },
     },
 
     const tombstone = -1;
-    pub const empty = String{ .len = 0, .payload = .{ .content = @splat(0) } };
-    pub const deleted = String{ .len = tombstone, .payload = .{ .content = @splat(0) } };
+    pub const empty = String{ .len = 0, .payload = .{ .content = 0 } };
+    pub const deleted = String{ .len = tombstone, .payload = .{ .content = 0 } };
 
     // for packages that already have String imported, then can use String.Global
     pub const Global = M.Global;
@@ -48,7 +46,7 @@ pub const String = packed struct {
 
             var content: [12]u8 = @splat(0);
             @memcpy(content[0..l], input);
-            return .{ .len = @intCast(l), .payload = .{ .content = content } };
+            return .{ .len = @intCast(l), .payload = .{ .content = @bitCast(content) } };
         }
 
         // Runtime path - handle both String and []const u8
@@ -61,14 +59,14 @@ pub const String = packed struct {
         if (l <= 12) {
             var content: [12]u8 = @splat(0);
             @memcpy(content[0..l], input);
-            return .{ .len = @intCast(l), .payload = .{ .content = content } };
+            return .{ .len = @intCast(l), .payload = .{ .content = @bitCast(content) } };
         }
 
         return .{
             .len = @intCast(l),
             .payload = .{ .heap = .{
-                .prefix = input[0..4].*,
-                .ptr = input.ptr,
+                .prefix = @bitCast(input[0..4].*),
+                .ptr = @intFromPtr(input.ptr),
             } },
         };
     }
@@ -84,14 +82,14 @@ pub const String = packed struct {
         if (l <= 12) {
             var content: [12]u8 = @splat(0);
             @memcpy(content[0..l], input);
-            return .{ .len = @intCast(l), .payload = .{ .content = content } };
+            return .{ .len = @intCast(l), .payload = .{ .content = @bitCast(content) } };
         }
 
         return .{
             .len = @intCast(l),
             .payload = .{ .heap = .{
-                .prefix = input[0..4].*,
-                .ptr = (intern(input) orelse (if (opts.dupe) (try allocator.dupe(u8, input)) else input)).ptr,
+                .prefix = @bitCast(input[0..4].*),
+                .ptr = @intFromPtr((intern(input) orelse (if (opts.dupe) (try allocator.dupe(u8, input)) else input)).ptr),
             } },
         };
     }
@@ -99,7 +97,7 @@ pub const String = packed struct {
     pub fn deinit(self: *const String, allocator: Allocator) void {
         const len = self.len;
         if (len > 12) {
-            allocator.free(self.payload.heap.ptr[0..@intCast(len)]);
+            allocator.free(heapPtr(self)[0..@intCast(len)]);
         }
     }
 
@@ -120,7 +118,7 @@ pub const String = packed struct {
                 @memcpy(content[pos..][0..part.len], part);
                 pos += part.len;
             }
-            return .{ .len = @intCast(total_len), .payload = .{ .content = content } };
+            return .{ .len = @intCast(total_len), .payload = .{ .content = @bitCast(content) } };
         }
 
         const result = try allocator.alloc(u8, total_len);
@@ -133,8 +131,8 @@ pub const String = packed struct {
         return .{
             .len = @intCast(total_len),
             .payload = .{ .heap = .{
-                .prefix = result[0..4].*,
-                .ptr = (intern(result) orelse result).ptr,
+                .prefix = @bitCast(result[0..4].*),
+                .ptr = @intFromPtr((intern(result) orelse result).ptr),
             } },
         };
     }
@@ -152,7 +150,7 @@ pub const String = packed struct {
             return slice[4 .. ul + 4];
         }
 
-        return self.payload.heap.ptr[0..ul];
+        return heapPtr(self)[0..ul];
     }
 
     pub fn isDeleted(self: *const String) bool {
@@ -174,13 +172,17 @@ pub const String = packed struct {
         }
 
         if (len <= 12) {
-            return @reduce(.And, a.payload.content == b.payload.content);
+            return a.payload.content == b.payload.content;
         }
 
         // a.len == b.len at this point
         const al: usize = @intCast(len);
         const bl: usize = @intCast(len);
-        return std.mem.eql(u8, a.payload.heap.ptr[0..al], b.payload.heap.ptr[0..bl]);
+        return std.mem.eql(u8, heapPtr(&a)[0..al], heapPtr(&b)[0..bl]);
+    }
+
+    fn heapPtr(self: *const String) [*]const u8 {
+        return @ptrFromInt(self.payload.heap.ptr);
     }
 
     pub fn eqlSlice(a: String, b: []const u8) bool {

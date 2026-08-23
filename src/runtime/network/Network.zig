@@ -13,12 +13,14 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const sync = @import("../../support/sync.zig");
+const runtime_io = @import("../../support/io.zig");
 const assert = @import("../../support/assert.zig").assert;
 const builtin = @import("builtin");
 
 const log = @import("../../support/log.zig");
-const net = std.net;
-const posix = std.posix;
+const net = @import("../../support/net.zig");
+const posix = @import("../../support/posix.zig");
 const Allocator = std.mem.Allocator;
 
 const Config = @import("../Config.zig");
@@ -64,12 +66,12 @@ cache_disabled: bool = false,
 
 connections: []http.Connection,
 available: std.DoublyLinkedList = .{},
-conn_mutex: std.Thread.Mutex = .{},
+conn_mutex: sync.Mutex = .{},
 
 ws_pool: std.heap.MemoryPool(http.Connection),
 ws_count: usize = 0,
 ws_max: u8,
-ws_mutex: std.Thread.Mutex = .{},
+ws_mutex: sync.Mutex = .{},
 
 pollfds: []posix.pollfd,
 listener: ?Listener = null,
@@ -84,12 +86,12 @@ shutdown: std.atomic.Value(bool) = .init(false),
 // Currently, Network is used sparingly, and we only create it on demand.
 // When Network becomes truly shared, it should become a regular field.
 multi: ?*libcurl.CurlM = null,
-submission_mutex: std.Thread.Mutex = .{},
+submission_mutex: sync.Mutex = .{},
 submission_queue: std.DoublyLinkedList = .{},
 
 callbacks: [MAX_TICK_CALLBACKS]TickCallback = undefined,
 callbacks_len: usize = 0,
-callbacks_mutex: std.Thread.Mutex = .{},
+callbacks_mutex: sync.Mutex = .{},
 queued_count: usize = 0,
 active_handles: usize = 0,
 
@@ -213,7 +215,7 @@ pub fn init(allocator: Allocator, app: *App, config: *const Config) !Network {
         .web_bot_auth = web_bot_auth,
         .cache = cache,
 
-        .ws_pool = .init(allocator),
+        .ws_pool = .empty,
         .ws_max = config.wsMaxConcurrent(),
 
         .ip_filter = ip_filter,
@@ -245,7 +247,7 @@ pub fn deinit(self: *Network) void {
     }
     self.allocator.free(self.connections);
 
-    self.ws_pool.deinit();
+    self.ws_pool.deinit(self.allocator);
 
     self.robot_store.deinit();
     if (self.web_bot_auth) |wba| {
@@ -774,7 +776,7 @@ pub fn newConnection(self: *Network) ?*http.Connection {
             return null;
         }
 
-        const c = self.ws_pool.create() catch return null;
+        const c = self.ws_pool.create(self.allocator) catch return null;
         self.ws_count += 1;
         break :blk c;
     };
@@ -792,44 +794,14 @@ pub fn newConnection(self: *Network) ?*http.Connection {
     return conn;
 }
 
-// Wraps lines @ 64 columns. A PEM is basically a base64 encoded DER (which is
-// what Zig has), with lines wrapped at 64 characters and with a basic header
-// and footer
-const LineWriter = struct {
-    col: usize = 0,
-    inner: std.ArrayList(u8).Writer,
-
-    pub fn writeAll(self: *LineWriter, data: []const u8) !void {
-        var writer = self.inner;
-
-        var col = self.col;
-        const len = 64 - col;
-
-        var remain = data;
-        if (remain.len > len) {
-            col = 0;
-            try writer.writeAll(data[0..len]);
-            try writer.writeByte('\n');
-            remain = data[len..];
-        }
-
-        while (remain.len > 64) {
-            try writer.writeAll(remain[0..64]);
-            try writer.writeByte('\n');
-            remain = remain[64..];
-        }
-        try writer.writeAll(remain);
-        self.col = col + remain.len;
-    }
-};
-
 // TODO: on BSD / Linux, we could just read the PEM file directly.
 // This whole rescan + decode is really just needed for MacOS. On Linux
 // bundle.rescan does find the .pem file(s) which could be in a few different
 // places, so it's still useful, just not efficient.
 fn loadCerts(allocator: Allocator) !libcurl.CurlBlob {
-    var bundle: std.crypto.Certificate.Bundle = .{};
-    try bundle.rescan(allocator);
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    const io = runtime_io.get();
+    try bundle.rescan(allocator, io, .now(io, .real));
     defer bundle.deinit(allocator);
 
     const bytes = bundle.bytes.items;
@@ -843,34 +815,39 @@ fn loadCerts(allocator: Allocator) !libcurl.CurlBlob {
     }
 
     const encoder = std.base64.standard.Encoder;
-    var arr: std.ArrayList(u8) = .empty;
-
     const encoded_size = encoder.calcSize(bytes.len);
     const buffer_size = encoded_size +
         (bundle.map.count() * 75) + // start / end per certificate + extra, just in case
         (encoded_size / 64) // newline per 64 characters
     ;
-    try arr.ensureTotalCapacity(allocator, buffer_size);
-    errdefer arr.deinit(allocator);
-    var writer = arr.writer(allocator);
+    var allocating = try std.Io.Writer.Allocating.initCapacity(allocator, buffer_size);
+    defer allocating.deinit();
+    const writer = &allocating.writer;
 
     var it = bundle.map.valueIterator();
     while (it.next()) |index| {
         const cert = try std.crypto.Certificate.der.Element.parse(bytes, index.*);
 
         try writer.writeAll("-----BEGIN CERTIFICATE-----\n");
-        var line_writer = LineWriter{ .inner = writer };
-        try encoder.encodeWriter(&line_writer, bytes[index.*..cert.slice.end]);
+        const der_bytes = bytes[index.*..cert.slice.end];
+        const encoded = try allocator.alloc(u8, encoder.calcSize(der_bytes.len));
+        defer allocator.free(encoded);
+        _ = encoder.encode(encoded, der_bytes);
+        var line_start: usize = 0;
+        while (line_start < encoded.len) : (line_start += 64) {
+            const line_end = @min(line_start + 64, encoded.len);
+            try writer.writeAll(encoded[line_start..line_end]);
+            if (line_end < encoded.len) try writer.writeByte('\n');
+        }
         try writer.writeAll("\n-----END CERTIFICATE-----\n");
     }
 
     // Final encoding should not be larger than our initial size estimate
-    assert(buffer_size > arr.items.len, "Http loadCerts", .{ .estimate = buffer_size, .len = arr.items.len });
+    const pem = allocating.written();
+    assert(buffer_size > pem.len, "Http loadCerts", .{ .estimate = buffer_size, .len = pem.len });
 
     // Allocate exactly the size needed and copy the data
-    const result = try allocator.dupe(u8, arr.items);
-    // Free the original oversized allocation
-    arr.deinit(allocator);
+    const result = try allocator.dupe(u8, pem);
 
     return .{
         .len = result.len,

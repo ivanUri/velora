@@ -15,6 +15,7 @@ const v = @import("koko");
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const sync = @import("../../support/sync.zig");
 
 const App = v.App;
 const CDP = @import("../../protocols/cdp/CDP.zig");
@@ -23,8 +24,8 @@ const CDPClient = @import("../../core/browser/HttpClient.zig").CDPClient;
 const WsConnection = @import("../../runtime/network/WsConnection.zig");
 
 const log = v.log;
-const net = std.net;
-const posix = std.posix;
+const net = v.net;
+const posix = @import("../../support/posix.zig");
 const Allocator = std.mem.Allocator;
 
 const Server = @This();
@@ -34,10 +35,10 @@ json_version_response: []const u8,
 
 // Thread management
 active_threads: std.atomic.Value(u32) = .init(0),
-pending: std.ArrayList(*CDP) = .{},
+pending: std.ArrayList(*CDP) = .empty,
 
-conns: std.ArrayList(*CDP) = .{},
-conns_mutex: std.Thread.Mutex = .{},
+conns: std.ArrayList(*CDP) = .empty,
+conns_mutex: sync.Mutex = .{},
 conns_pool: std.heap.MemoryPool(CDP),
 
 pub fn init(app: *App, address: net.Address) !*Server {
@@ -49,10 +50,10 @@ pub fn init(app: *App, address: net.Address) !*Server {
 
     self.* = .{
         .app = app,
-        .conns_pool = .init(app.allocator),
+        .conns_pool = .empty,
         .json_version_response = json_version_response,
     };
-    errdefer self.conns_pool.deinit();
+    errdefer self.conns_pool.deinit(app.allocator);
 
     var bound_address = address;
     try self.app.network.bind(&bound_address, self, onAccept);
@@ -82,12 +83,12 @@ pub fn deinit(self: *Server) void {
     self.shutdown();
 
     while (self.active_threads.load(.monotonic) > 0) {
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        std.Io.sleep(v.io.get(), .fromMilliseconds(10), .awake) catch {};
     }
 
     self.conns.deinit(self.app.allocator);
     self.pending.deinit(self.app.allocator);
-    self.conns_pool.deinit();
+    self.conns_pool.deinit(self.app.allocator);
     self.app.allocator.free(self.json_version_response);
     self.app.allocator.destroy(self);
 }
@@ -205,7 +206,7 @@ fn unregisterHandshake(self: *Server, conn: *CDP) void {
 fn allocConn(self: *Server) !*CDP {
     self.conns_mutex.lock();
     defer self.conns_mutex.unlock();
-    return self.conns_pool.create();
+    return self.conns_pool.create(self.app.allocator);
 }
 
 fn releaseConn(self: *Server, conn: *CDP) void {
@@ -542,7 +543,7 @@ fn assertWebSocketError(close_code: u16, input: []const u8) !void {
     defer c.deinit();
 
     try c.handshake();
-    try c.stream.writeAll(input);
+    try writeAll(c.stream, input);
 
     const msg = try c.readWebsocketMessage() orelse return error.NoMessage;
     defer if (msg.cleanup_fragment) {
@@ -559,7 +560,7 @@ fn assertWebSocketMessage(expected: []const u8, input: []const u8) !void {
     defer c.deinit();
 
     try c.handshake();
-    try c.stream.writeAll(input);
+    try writeAll(c.stream, input);
 
     const msg = try c.readWebsocketMessage() orelse return error.NoMessage;
     defer if (msg.cleanup_fragment) {
@@ -571,7 +572,7 @@ fn assertWebSocketMessage(expected: []const u8, input: []const u8) !void {
 }
 
 const MockCDP = struct {
-    messages: std.ArrayList([]const u8) = .{},
+    messages: std.ArrayList([]const u8) = .empty,
 
     allocator: Allocator = testing.allocator,
 
@@ -596,15 +597,17 @@ const MockCDP = struct {
 };
 
 fn createTestClient() !TestClient {
-    const address = std.net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, 9583);
-    const stream = try std.net.tcpConnectToAddress(address);
+    const address = net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, 9583);
+    const stream = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+    errdefer posix.close(stream);
+    try posix.connect(stream, &address.any, address.getOsSockLen());
 
     const timeout = std.mem.toBytes(posix.timeval{
         .sec = 2,
         .usec = 0,
     });
-    try posix.setsockopt(stream.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &timeout);
-    try posix.setsockopt(stream.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, &timeout);
+    try posix.setsockopt(stream, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &timeout);
+    try posix.setsockopt(stream, posix.SOL.SOCKET, posix.SO.SNDTIMEO, &timeout);
     return .{
         .stream = stream,
         .reader = .{
@@ -615,22 +618,22 @@ fn createTestClient() !TestClient {
 }
 
 const TestClient = struct {
-    stream: std.net.Stream,
+    stream: posix.socket_t,
     buf: [1024]u8 = undefined,
     reader: WsConnection.Reader(false),
 
     fn deinit(self: *TestClient) void {
-        self.stream.close();
+        posix.close(self.stream);
         self.reader.deinit();
     }
 
     fn httpRequest(self: *TestClient, req: []const u8) ![]const u8 {
-        try self.stream.writeAll(req);
+        try writeAll(self.stream, req);
 
         var pos: usize = 0;
         var total_length: ?usize = null;
         while (true) {
-            pos += try self.stream.read(self.buf[pos..]);
+            pos += try posix.read(self.stream, self.buf[pos..]);
             if (pos == 0) {
                 return error.NoMoreData;
             }
@@ -686,7 +689,7 @@ const TestClient = struct {
 
     fn readWebsocketMessage(self: *TestClient) !?WsConnection.Message {
         while (true) {
-            const n = try self.stream.read(self.reader.readBuf());
+            const n = try posix.read(self.stream, self.reader.readBuf());
             if (n == 0) {
                 return error.Closed;
             }
@@ -697,3 +700,10 @@ const TestClient = struct {
         }
     }
 };
+
+fn writeAll(socket: posix.socket_t, bytes: []const u8) !void {
+    var written: usize = 0;
+    while (written < bytes.len) {
+        written += try posix.write(socket, bytes[written..]);
+    }
+}

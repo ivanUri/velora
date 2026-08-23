@@ -12,6 +12,10 @@ pub const cookies = @import("runtime/cookies.zig");
 pub const profile_session = @import("runtime/profile_session.zig");
 pub const profile_cmd = @import("runtime/profile_cmd.zig");
 pub const Server = @import("adapters/server/Server.zig");
+pub const io = @import("support/io.zig");
+pub const sync = @import("support/sync.zig");
+pub const net = @import("support/net.zig");
+pub const timer = @import("support/timer.zig");
 pub const log = @import("support/log.zig");
 pub const crash_handler = @import("support/crash_handler.zig");
 pub const String = @import("support/string.zig").String;
@@ -69,9 +73,10 @@ const ProgressSnapshot = struct {
 /// final fetch dump rewrites it with the authoritative snapshot.
 fn writeProgressSnapshot(context: *anyopaque, frame: *Frame) void {
     const progress: *ProgressSnapshot = @ptrCast(@alignCast(context));
-    var file = std.fs.cwd().createFile(progress.path, .{ .truncate = true }) catch return;
-    defer file.close();
-    var writer = file.writer(&.{});
+    const process_io = io.get();
+    const file = std.Io.Dir.cwd().createFile(process_io, progress.path, .{ .truncate = true }) catch return;
+    defer file.close(process_io);
+    var writer = file.writer(process_io, &.{});
     var opts = progress.dump;
     // Repeated progress snapshots must not mutate the live document by adding
     // a new <base> element on every tick. The final snapshot still honours the
@@ -151,7 +156,7 @@ pub fn fetch(_: *App, browser: *Browser, url: [:0]const u8, opts: FetchOpts) !vo
         });
         try active_frame.triggerMouseClick(x, y);
         log.debug(.app, "fetch click done", .{ .url = url, .selector = selector });
-        std.Thread.sleep(500 * std.time.ns_per_ms);
+        @import("support/timer.zig").sleepNanoseconds(500 * std.time.ns_per_ms);
     }
     if (opts.wait_script) |script| {
         log.debug(.app, "fetch wait script start", .{ .url = url, .wait_ms = opts.wait_ms });
@@ -174,9 +179,10 @@ pub fn fetch(_: *App, browser: *Browser, url: [:0]const u8, opts: FetchOpts) !vo
     // serialize this final DOM to a sidecar file for consumers that need both
     // HTML and Markdown from the same browser run.
     if (opts.dump_html_file) |path| {
-        var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-        defer file.close();
-        var file_writer = file.writer(&.{});
+        const process_io = io.get();
+        const file = try std.Io.Dir.cwd().createFile(process_io, path, .{ .truncate = true });
+        defer file.close(process_io);
+        var file_writer = file.writer(process_io, &.{});
         try dump.root(dump_frame.document, opts.dump, &file_writer.interface, dump_frame);
         try file_writer.interface.flush();
     }

@@ -154,10 +154,10 @@ fn timestamp() u64 {
 }
 
 fn renderConsoleArgs(allocator: Allocator, values: []js.Value) ![]const u8 {
-    var list = std.ArrayList(u8).initCapacity(allocator, 0) catch return error.OutOfMemory;
-    errdefer list.deinit(allocator);
+    var list = std.Io.Writer.Allocating.init(allocator);
+    errdefer list.deinit();
 
-    var writer = list.writer(allocator);
+    const writer = &list.writer;
     for (values, 0..) |value, i| {
         if (i != 0) {
             try writer.writeAll("\n");
@@ -165,7 +165,7 @@ fn renderConsoleArgs(allocator: Allocator, values: []js.Value) ![]const u8 {
         try writer.print("arg({d}): ", .{i + 1});
         try writeDetailedValue(allocator, writer, value);
     }
-    return list.toOwnedSlice(allocator);
+    return list.toOwnedSlice();
 }
 
 fn writeDetailedValue(allocator: Allocator, writer: anytype, value: js.Value) !void {
@@ -250,7 +250,7 @@ const ValueWriter = struct {
     values: []js.Value,
     stack: ?[]const u8 = null,
 
-    pub fn format(self: ValueWriter, writer: *std.io.Writer) !void {
+    pub fn format(self: ValueWriter, writer: *std.Io.Writer) !void {
         for (self.values, 1..) |value, i| {
             try writer.print("\n  arg({d}): {f}", .{ i, value });
         }

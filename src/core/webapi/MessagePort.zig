@@ -130,8 +130,8 @@ _closed: bool = false,
 _on_message: ?js.Function.Global = null,
 _on_message_error: ?js.Function.Global = null,
 _entangled_port: ?*MessagePort = null,
-_pending_messages: std.ArrayList(js.Value.Temp) = .{},
-_pending_deliveries: std.ArrayList(js.Value.Temp) = .{},
+_pending_messages: std.ArrayList(js.Value.Temp) = .empty,
+_pending_deliveries: std.ArrayList(js.Value.Temp) = .empty,
 // The execution context that currently owns this port (updated on transfer).
 _active_exec: *const js.Execution,
 
@@ -207,7 +207,7 @@ pub fn processTransferList(
     receiver_exec: *const js.Execution,
     arena: Allocator,
 ) ![]*MessagePort {
-    var ports: std.ArrayList(*MessagePort) = .{};
+    var ports: std.ArrayList(*MessagePort) = .empty;
     errdefer ports.deinit(arena);
 
     for (transfer) |item| {

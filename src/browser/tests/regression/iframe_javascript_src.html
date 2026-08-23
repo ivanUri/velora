@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<body>
+  <iframe src="javascript:parent.document.body.dataset.executed='yes'"></iframe>
+</body>
+<script>
+setTimeout(() => {
+  // The executable URL is intentionally treated as a non-network child
+  // navigation until javascript: navigation has a dedicated evaluator.
+  document.body.id = "pass";
+}, 0);
+window.testing = {
+  assertOk: () => document.body.id === "pass",
+  printTimeoutState: () => document.body.id,
+};
+</script>

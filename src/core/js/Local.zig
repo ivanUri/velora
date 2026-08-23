@@ -13,6 +13,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const runtime_io = @import("../../support/io.zig");
 const string = @import("../../support/string.zig");
 
 const Page = @import("../browser/Page.zig");
@@ -130,7 +131,7 @@ pub fn compileFunction(
     src: anytype,
     /// We tend to know how many params we'll pass; can remove the comptime if necessary.
     comptime parameter_names: []const []const u8,
-    extensions: []const v8.Object,
+    extensions: []const *const v8.Object,
 ) !js.Function {
     if (self.ctx.env.isExecutionTerminating()) return error.ExecutionTerminated;
 
@@ -159,7 +160,7 @@ pub fn compileFunction(
         parameter_list.len,
         &parameter_list,
         extensions.len,
-        @ptrCast(&extensions),
+        @ptrCast(extensions.ptr),
         v8.kNoCompileOptions,
         v8.kNoCacheNoReason,
     ) orelse return error.CompilationError;
@@ -400,7 +401,7 @@ pub fn mapZigInstanceToJs(self: *const Local, js_obj_handle: ?*const v8.Object, 
                     );
                 }
                 const fc = finalizer_gop.value_ptr.*;
-                const identity_finalizer = try session.fc_identity_pool.create();
+                const identity_finalizer = try session.fc_identity_pool.create(session.browser.app.allocator);
                 identity_finalizer.* = .{
                     .page = page,
                     .session = session,
@@ -815,7 +816,7 @@ pub fn jsValueToZig(self: *const Local, comptime T: type, js_val: js.Value) !T {
                 return std.meta.stringToEnum(T, try js_str.toSlice()) orelse return error.InvalidArgument;
             }
             switch (@typeInfo(e.tag_type)) {
-                .int => return std.meta.intToEnum(T, try jsIntToZig(e.tag_type, js_val)),
+                .int => return std.enums.fromInt(T, try jsIntToZig(e.tag_type, js_val)) orelse error.TypeError,
                 else => @compileError("unsupported enum parameter type: " ++ @typeName(T)),
             }
         },
@@ -1536,8 +1537,8 @@ pub fn stackTrace(self: *const Local) !?[]const u8 {
     const isolate = self.isolate;
     const separator = log.separator();
 
-    var buf: std.ArrayList(u8) = .empty;
-    var writer = buf.writer(self.call_arena);
+    var buf = std.Io.Writer.Allocating.init(self.call_arena);
+    const writer = &buf.writer;
 
     const stack_trace_handle = v8.v8__StackTrace__CurrentStackTrace__STATIC(isolate.handle, 30).?;
     const frame_count = v8.v8__StackTrace__GetFrameCount(stack_trace_handle);
@@ -1556,7 +1557,7 @@ pub fn stackTrace(self: *const Local) !?[]const u8 {
             try writer.print("{s}<anonymous>:{d}", .{ separator, v8.v8__StackFrame__GetLineNumber(frame_handle) });
         }
     }
-    return buf.items;
+    return buf.written();
 }
 
 // == Promise Helpers ==
@@ -1573,7 +1574,7 @@ pub fn rejectErrorPromise(self: *const Local, value: js.PromiseResolver.RejectEr
 }
 
 pub fn resolvePromise(self: *const Local, value: anytype) !js.Promise {
-    if (std.posix.getenv("KOKO_PROMISE_STACK") != null) {
+    if (runtime_io.getenv("KOKO_PROMISE_STACK") != null) {
         log.info(.browser, "Local.resolvePromise caller", .{
             .stack = self.stackTrace() catch null,
         });

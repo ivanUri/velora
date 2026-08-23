@@ -12,8 +12,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
-const builtin = @import("builtin");
-const posix = std.posix;
+const runtime_io = @import("io.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -286,7 +285,7 @@ pub const DateTime = struct {
 
     pub fn now() DateTime {
         return .{
-            .micros = std.time.microTimestamp(),
+            .micros = @intCast(microTimestamp(.clock)),
         };
     }
 
@@ -517,45 +516,32 @@ pub const DateTime = struct {
     }
 };
 
-// true if we should use clock_gettime()
-const is_posix = switch (builtin.os.tag) {
-    .windows, .uefi, .wasi => false,
-    else => true,
-};
-
 pub const TimestampMode = enum {
     clock,
     monotonic,
 };
 pub fn timestamp(comptime mode: TimestampMode) u64 {
-    if (comptime is_posix == false or mode == .clock) {
-        return @intCast(std.time.timestamp());
-    }
-    const ts = timespec();
-    return @intCast(ts.sec);
+    return @intCast(now(mode).toSeconds());
 }
 
 pub fn milliTimestamp(comptime mode: TimestampMode) u64 {
-    if (comptime is_posix == false or mode == .clock) {
-        return @intCast(std.time.milliTimestamp());
-    }
-    const ts = timespec();
-    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(@divTrunc(ts.nsec, 1_000_000)));
+    return @intCast(now(mode).toMilliseconds());
 }
 
-pub fn timespec() posix.timespec {
-    if (comptime is_posix == false) {
-        @compileError("`timespec` should not be called when `is_posix` is false");
-    }
+pub fn microTimestamp(comptime mode: TimestampMode) u64 {
+    return @intCast(now(mode).toMicroseconds());
+}
 
-    const clock_id = switch (@import("builtin").os.tag) {
-        .freebsd, .dragonfly => posix.CLOCK.MONOTONIC_FAST,
-        .macos, .ios, .tvos, .watchos, .visionos => posix.CLOCK.UPTIME_RAW, // continues counting while suspended
-        .linux => posix.CLOCK.BOOTTIME, // continues counting while suspended
-        else => posix.CLOCK.MONOTONIC,
+pub fn nanoTimestamp(comptime mode: TimestampMode) i96 {
+    return now(mode).toNanoseconds();
+}
+
+fn now(comptime mode: TimestampMode) std.Io.Timestamp {
+    const clock: std.Io.Clock = switch (mode) {
+        .clock => .real,
+        .monotonic => .boot,
     };
-    // unreac
-    return posix.clock_gettime(clock_id) catch unreachable;
+    return clock.now(runtime_io.get());
 }
 
 fn writeDate(into: []u8, date: Date) u8 {
@@ -1226,7 +1212,7 @@ test "DateTime: initUTC" {
 
 test "DateTime: now" {
     const dt = DateTime.now();
-    try testing.expectDelta(std.time.microTimestamp(), dt.micros, 1000);
+    try testing.expectDelta(@as(i64, @intCast(microTimestamp(.clock))), dt.micros, 1000);
 }
 
 test "DateTime: date" {

@@ -433,14 +433,19 @@ pub fn inheritOptions(comptime T: type, comptime additions: anytype) type {
     const additions_info = @typeInfo(additions);
     all_fields = all_fields ++ additions_info.@"struct".fields;
 
-    return @Type(.{
-        .@"struct" = .{
-            .layout = .auto,
-            .fields = all_fields,
-            .decls = &.{},
-            .is_tuple = false,
-        },
-    });
+    var field_names: [all_fields.len][]const u8 = undefined;
+    var field_types: [all_fields.len]type = undefined;
+    var field_attrs: [all_fields.len]std.builtin.Type.StructField.Attributes = undefined;
+    for (all_fields, 0..) |field, i| {
+        field_names[i] = field.name;
+        field_types[i] = field.type;
+        field_attrs[i] = .{
+            .@"comptime" = field.is_comptime,
+            .@"align" = field.alignment,
+            .default_value_ptr = field.default_value_ptr,
+        };
+    }
+    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
 }
 
 pub fn populatePrototypes(self: anytype, opts: anytype, trusted: bool) void {

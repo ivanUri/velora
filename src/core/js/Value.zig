@@ -597,7 +597,7 @@ pub fn structuredCloneTo(self: Value, target: *const js.Local, transfer_list: ?[
     const v8_isolate = target.isolate.handle;
 
     const TransferInfo = struct { id: u32, byte_len: usize };
-    var transfer_infos: std.ArrayList(TransferInfo) = .{};
+    var transfer_infos: std.ArrayList(TransferInfo) = .empty;
     defer transfer_infos.deinit(self.local.call_arena);
 
     if (transfer_list) |list| {

@@ -15,15 +15,14 @@ const Performance = @This();
 
 /// Monotonic microsecond anchor for performance.now() (reset on each navigation).
 _monotonic_origin_us: u64,
-_entries: std.ArrayList(*Entry) = .{},
+_entries: std.ArrayList(*Entry) = .empty,
 _timing: PerformanceTiming = .{},
 _navigation: PerformanceNavigation = .{},
 _event_counts: EventCounts = .{},
 
 /// High-resolution monotonic clock with Chrome-like quantization (~100μs + jitter).
 fn highResTimestamp() u64 {
-    const ts = datetime.timespec();
-    const micros = @as(u64, @intCast(ts.sec)) * 1_000_000 + @as(u64, @intCast(@divTrunc(ts.nsec, 1_000)));
+    const micros = datetime.microTimestamp(.monotonic);
     const base = @divTrunc(micros + 50, 100) * 100;
     const jitter = (micros ^ (micros >> 7) ^ (micros >> 13)) % 23;
     return base + jitter;
@@ -32,7 +31,7 @@ fn highResTimestamp() u64 {
 pub fn init() Performance {
     return .{
         ._monotonic_origin_us = highResTimestamp(),
-        ._entries = .{},
+        ._entries = .empty,
         ._timing = .{},
         ._navigation = .{},
     };
@@ -95,7 +94,7 @@ pub fn getTimeOrigin(self: *const Performance) f64 {
     if (self._timing.navigation_start > 0) {
         return self._timing.navigation_start;
     }
-    return @as(f64, @floatFromInt(std.time.milliTimestamp()));
+    return @as(f64, @floatFromInt(datetime.milliTimestamp(.clock)));
 }
 
 pub fn getNavigation(self: *Performance) *PerformanceNavigation {
@@ -684,7 +683,7 @@ pub const PerformanceTiming = struct {
     load_event_end: f64 = 0,
 
     fn epochMs() f64 {
-        return @as(f64, @floatFromInt(std.time.milliTimestamp()));
+        return @as(f64, @floatFromInt(datetime.milliTimestamp(.clock)));
     }
 
     fn timingMs(value: f64) f64 {

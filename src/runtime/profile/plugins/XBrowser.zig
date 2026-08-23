@@ -1,6 +1,7 @@
 const std = @import("std");
 const HttpClient = @import("../../../core/browser/HttpClient.zig");
 const ClientVariations = @import("ClientVariations.zig");
+const runtime_io = @import("../../../support/io.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -17,12 +18,8 @@ pub const Plugin = struct {
     config: Config,
 
     pub fn load(allocator: Allocator) !Plugin {
-        const file = try std.fs.cwd().openFile("browser/policies/plugins/x-browser.json", .{});
-        defer file.close();
-        const stat = try file.stat();
-        const bytes = try allocator.alloc(u8, stat.size);
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(runtime_io.get(), "browser/policies/plugins/x-browser.json", allocator, .limited(1024 * 1024));
         defer allocator.free(bytes);
-        _ = try file.readAll(bytes);
 
         var parsed = try std.json.parseFromSlice(JsonPlugin, allocator, bytes, .{
             .ignore_unknown_fields = true,
@@ -63,7 +60,7 @@ pub const Plugin = struct {
         // A diagnostic override remains available for capture comparison.
         // Production behavior is derived from the current persona UA and its
         // platform-specific key; it never selects a frozen browser capture.
-        const validation = if (std.posix.getenv("KOKO_X_BROWSER_VALIDATION")) |override|
+        const validation = if (runtime_io.getenv("KOKO_X_BROWSER_VALIDATION")) |override|
             try allocator.dupeZ(u8, override)
         else
             try validationToken(allocator, &self.config, user_agent);
@@ -116,7 +113,7 @@ fn appendClientDataHeader(
     allocator: Allocator,
     fingerprint_seed: u64,
 ) !void {
-    if (std.posix.getenv("KOKO_X_CLIENT_DATA")) |override| {
+    if (runtime_io.getenv("KOKO_X_CLIENT_DATA")) |override| {
         if (override.len == 0) return;
         const xcd_hdr = try std.fmt.allocPrintSentinel(
             allocator,
@@ -129,7 +126,7 @@ fn appendClientDataHeader(
     }
 
     const b64 = blk: {
-        if (std.posix.getenv("KOKO_VARIATION_IDS")) |csv| {
+        if (runtime_io.getenv("KOKO_VARIATION_IDS")) |csv| {
             const ids = try ClientVariations.parseIdList(allocator, csv);
             defer allocator.free(ids);
             break :blk try ClientVariations.encodeBase64(allocator, ids, &[_]i32{});

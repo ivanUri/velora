@@ -14,7 +14,8 @@
 
 const std = @import("std");
 const json = std.json;
-const posix = std.posix;
+const posix = @import("../../support/posix.zig");
+const Timer = @import("../../support/timer.zig");
 
 const CDP = @import("CDP.zig");
 const Server = @import("../../adapters/server/Server.zig");
@@ -205,7 +206,7 @@ const TestContext = struct {
                     _ = try runner.tick(.{ .ms = 1000 });
                 }
             }
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            Timer.sleepNanoseconds(5 * std.time.ns_per_ms);
             try self.read();
         }
         self.dumpReceived();
@@ -224,7 +225,7 @@ const TestContext = struct {
             if (index < self.received.items.len) {
                 return self.received.items[index];
             }
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            Timer.sleepNanoseconds(5 * std.time.ns_per_ms);
             try self.read();
         }
         return null;
@@ -251,7 +252,7 @@ const TestContext = struct {
                     _ = try runner.tick(.{ .ms = 1000 });
                 }
             }
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            Timer.sleepNanoseconds(5 * std.time.ns_per_ms);
         }
         return null;
     }

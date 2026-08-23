@@ -30,7 +30,7 @@ pub fn encode(alloc: Allocator, input: []const u8) ![]const u8 {
 /// https://infra.spec.whatwg.org/#forgiving-base64-decode
 pub fn decode(alloc: Allocator, input: []const u8) ![]const u8 {
     const trimmed = std.mem.trim(u8, input, &std.ascii.whitespace);
-    const unpadded = std.mem.trimRight(u8, trimmed, "=");
+    const unpadded = std.mem.trimEnd(u8, trimmed, "=");
 
     // Length % 4 == 1 is invalid (can't represent valid base64).
     if (unpadded.len % 4 == 1) {

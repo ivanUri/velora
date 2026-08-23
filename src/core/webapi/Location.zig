@@ -12,6 +12,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const runtime_io = @import("../../support/io.zig");
 const js = @import("../js/js.zig");
 
 const URL = @import("URL.zig");
@@ -124,7 +125,7 @@ pub fn replace(self: *const Location, url: [:0]const u8, frame: *Frame) !void {
 
 pub fn reload(self: *const Location, frame: *Frame) !void {
     const owner = self.ownerFrame(frame);
-    if (std.posix.getenv("KOKO_NAVIGATION_TRACE") != null) {
+    if (runtime_io.getenv("KOKO_NAVIGATION_TRACE") != null) {
         log.info(.browser, "Location.reload", .{
             .url = owner.url,
             .frame_id = owner._frame_id,

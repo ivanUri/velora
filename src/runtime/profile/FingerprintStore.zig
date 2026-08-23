@@ -1,4 +1,5 @@
 const std = @import("std");
+const runtime_io = @import("../../support/io.zig");
 const BrowserRoot = @import("BrowserRoot.zig");
 const ProfilePaths = @import("ProfilePaths.zig");
 
@@ -77,7 +78,7 @@ fn folderContainsFingerprint(folder: []const u8) bool {
 }
 
 fn fileExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    std.Io.Dir.cwd().access(runtime_io.get(), path, .{}) catch return false;
     return true;
 }
 
@@ -96,18 +97,20 @@ test "FingerprintStore: explicit source is a folder" {
     const base = "/tmp/koko-fingerprint-folder-test";
     const profile_dir = "/tmp/koko-fingerprint-folder-test/profile";
     const fingerprint_dir = "/tmp/koko-fingerprint-folder-test/artifact";
-    std.fs.cwd().deleteTree(base) catch {};
-    defer std.fs.cwd().deleteTree(base) catch {};
-    try std.fs.cwd().makePath(fingerprint_dir);
-    var file = try std.fs.cwd().createFile(
+    const io = runtime_io.get();
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, fingerprint_dir);
+    var file = try std.Io.Dir.cwd().createFile(
+        io,
         "/tmp/koko-fingerprint-folder-test/artifact/fingerprint.json",
         .{},
     );
-    file.close();
+    file.close(io);
 
     var paths = try ProfilePaths.ProfilePaths.init(allocator, base, "profile", fingerprint_dir);
     defer paths.deinit();
-    try std.fs.cwd().makePath(profile_dir);
+    try std.Io.Dir.cwd().createDirPath(io, profile_dir);
 
     var source = try resolve(allocator, &paths, fingerprint_dir);
     defer source.deinit(allocator);

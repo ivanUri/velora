@@ -848,19 +848,14 @@ pub const JsApiLookup = struct {
     ///    const index_id = types.getId(@TypeOf(res));
     ///
     pub const Enum = blk: {
-        var fields: [JsApis.len]std.builtin.Type.EnumField = undefined;
+        var field_names: [JsApis.len][]const u8 = undefined;
+        var field_values: [JsApis.len]BackingInt = undefined;
         for (JsApis, 0..) |JsApi, i| {
-            fields[i] = .{ .name = @typeName(JsApi), .value = i };
+            field_names[i] = @typeName(JsApi);
+            field_values[i] = @intCast(i);
         }
 
-        break :blk @Type(.{
-            .@"enum" = .{
-                .fields = &fields,
-                .tag_type = BackingInt,
-                .is_exhaustive = true,
-                .decls = &.{},
-            },
-        });
+        break :blk @Enum(BackingInt, .exhaustive, &field_names, &field_values);
     };
 
     /// Returns a boolean indicating if a type exist in the lookup.

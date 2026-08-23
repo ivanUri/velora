@@ -215,8 +215,8 @@ pub const CDPClient = struct {
 };
 
 pub fn init(self: *Client, allocator: Allocator, network: *Network, cdp_client: ?CDPClient) !void {
-    var transfer_pool = std.heap.MemoryPool(Transfer).init(allocator);
-    errdefer transfer_pool.deinit();
+    var transfer_pool: std.heap.MemoryPool(Transfer) = .empty;
+    errdefer transfer_pool.deinit(allocator);
 
     var handles = try http.Handles.init(network.config);
     errdefer handles.deinit();
@@ -277,7 +277,7 @@ pub fn deinit(self: *Client) void {
     self.abort();
     self.handles.deinit();
 
-    self.transfer_pool.deinit();
+    self.transfer_pool.deinit(self.allocator);
     self.clearUserAgentOverride();
     var alt_svc_it = self.alt_svc_h3.keyIterator();
     while (alt_svc_it.next()) |authority| self.allocator.free(authority.*);
@@ -1337,7 +1337,7 @@ pub fn incrReqId(self: *Client) u32 {
 }
 
 fn makeTransfer(self: *Client, req: Request) !*Transfer {
-    const transfer = try self.transfer_pool.create();
+    const transfer = try self.transfer_pool.create(self.allocator);
     errdefer self.transfer_pool.destroy(transfer);
 
     transfer.* = .{
@@ -2354,7 +2354,7 @@ pub const Transfer = struct {
 
     // Buffered response body. Filled by dataCallback; also replayed at completion
     // when no body chunks arrived (empty response).
-    _stream_buffer: std.ArrayList(u8) = .{},
+    _stream_buffer: std.ArrayList(u8) = .empty,
 
     // Error captured in dataCallback to be reported in processMessages.
     _callback_error: ?anyerror = null,

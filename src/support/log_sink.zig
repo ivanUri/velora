@@ -1,7 +1,7 @@
 const std = @import("std");
-const posix = std.posix;
 
 const datetime = @import("datetime.zig");
+const runtime_io = @import("io.zig");
 const Level = @import("log.zig").Level;
 const Scope = @import("log.zig").Scope;
 
@@ -95,14 +95,14 @@ const Sink = struct {
     allocator: std.mem.Allocator,
     run_dir: []const u8,
     base_dir: []const u8,
-    channel_files: [@typeInfo(Channel).@"enum".fields.len]?std.fs.File = .{null} ** @typeInfo(Channel).@"enum".fields.len,
-    js_console: ?std.fs.File = null,
-    js_engine: ?std.fs.File = null,
-    js_calls: ?std.fs.File = null,
-    cdp_wire: ?std.fs.File = null,
-    combined: ?std.fs.File = null,
-    errors: ?std.fs.File = null,
-    mutex: std.Thread.Mutex = .{},
+    channel_files: [@typeInfo(Channel).@"enum".fields.len]?std.Io.File = .{null} ** @typeInfo(Channel).@"enum".fields.len,
+    js_console: ?std.Io.File = null,
+    js_engine: ?std.Io.File = null,
+    js_calls: ?std.Io.File = null,
+    cdp_wire: ?std.Io.File = null,
+    combined: ?std.Io.File = null,
+    errors: ?std.Io.File = null,
+    mutex: std.Io.Mutex = .init,
     channel_levels: ChannelLevels = .{},
     cdp_trace: bool = false,
     started_at: u64 = 0,
@@ -130,14 +130,16 @@ const Sink = struct {
     }
 
     pub fn setContext(self: *Sink, ctx: Context) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = runtime_io.get();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         self.context = ctx;
     }
 
     pub fn clearContext(self: *Sink) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = runtime_io.get();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         self.context = .{};
     }
 
@@ -145,8 +147,8 @@ const Sink = struct {
         return self.context;
     }
 
-    fn openFile(path: []const u8) !std.fs.File {
-        return std.fs.cwd().createFile(path, .{ .truncate = true });
+    fn openFile(path: []const u8) !std.Io.File {
+        return std.Io.Dir.cwd().createFile(runtime_io.get(), path, .{ .truncate = true });
     }
 
     pub fn init(allocator: std.mem.Allocator, opts: InitOpts) !*Sink {
@@ -171,14 +173,15 @@ const Sink = struct {
         const run_dir = try std.fs.path.join(allocator, &.{ opts.base_dir, run_name });
         self.run_dir = run_dir;
 
-        try std.fs.cwd().makePath(opts.base_dir);
-        try std.fs.cwd().makePath(run_dir);
+        const io = runtime_io.get();
+        try std.Io.Dir.cwd().createDirPath(io, opts.base_dir);
+        try std.Io.Dir.cwd().createDirPath(io, run_dir);
 
         const subdirs = [_][]const u8{ "js", "core", "network", "protocol", "system" };
         for (subdirs) |sub| {
             const p = try std.fs.path.join(allocator, &.{ run_dir, sub });
             defer allocator.free(p);
-            try std.fs.cwd().makePath(p);
+            try std.Io.Dir.cwd().createDirPath(io, p);
         }
 
         {
@@ -229,15 +232,16 @@ const Sink = struct {
     }
 
     pub fn deinit(self: *Sink) void {
+        const io = runtime_io.get();
         self.flushAll() catch {};
-        if (self.js_console) |*f| f.close();
-        if (self.js_engine) |*f| f.close();
-        if (self.js_calls) |*f| f.close();
-        if (self.cdp_wire) |*f| f.close();
-        if (self.combined) |*f| f.close();
-        if (self.errors) |*f| f.close();
+        if (self.js_console) |*f| f.close(io);
+        if (self.js_engine) |*f| f.close(io);
+        if (self.js_calls) |*f| f.close(io);
+        if (self.cdp_wire) |*f| f.close(io);
+        if (self.combined) |*f| f.close(io);
+        if (self.errors) |*f| f.close(io);
         for (&self.channel_files) |*opt| {
-            if (opt.*) |*f| f.close();
+            if (opt.*) |*f| f.close(io);
         }
         self.allocator.free(self.base_dir);
         self.allocator.free(self.run_dir);
@@ -245,13 +249,14 @@ const Sink = struct {
     }
 
     pub fn routeFormattedLine(self: *Sink, scope: Scope, level: Level, msg: []const u8, line: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = runtime_io.get();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         const channel = scopeChannel(scope);
 
         if (channel == .js) {
             const sub = jsSubfile(msg);
-            const f: *?std.fs.File = switch (sub) {
+            const f: *?std.Io.File = switch (sub) {
                 .console => &self.js_console,
                 .engine => &self.js_engine,
                 .calls => &self.js_calls,
@@ -270,32 +275,34 @@ const Sink = struct {
         }
     }
 
-    fn writeLineFlush(file: *std.fs.File, line: []const u8) !void {
-        try file.writeAll(line);
+    fn writeLineFlush(file: *std.Io.File, line: []const u8) !void {
+        try file.writeStreamingAll(runtime_io.get(), line);
         // Avoid fsync per line — CDP/navigation threads share the sink mutex and
         // heavy sites (GitHub, eBay) can emit thousands of lines/sec, starving
         // inbound CDP command processing when every write syncs to disk.
     }
 
     fn flushAll(self: *Sink) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = runtime_io.get();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         inline for (&self.channel_files) |*opt| {
-            if (opt.*) |*f| f.sync() catch {};
+            if (opt.*) |*f| f.sync(io) catch {};
         }
-        if (self.js_console) |*f| f.sync() catch {};
-        if (self.js_engine) |*f| f.sync() catch {};
-        if (self.js_calls) |*f| f.sync() catch {};
-        if (self.cdp_wire) |*f| f.sync() catch {};
-        if (self.combined) |*f| f.sync() catch {};
-        if (self.errors) |*f| f.sync() catch {};
+        if (self.js_console) |*f| f.sync(io) catch {};
+        if (self.js_engine) |*f| f.sync(io) catch {};
+        if (self.js_calls) |*f| f.sync(io) catch {};
+        if (self.cdp_wire) |*f| f.sync(io) catch {};
+        if (self.combined) |*f| f.sync(io) catch {};
+        if (self.errors) |*f| f.sync(io) catch {};
     }
 
     pub fn writeCdpWire(self: *Sink, direction: []const u8, payload: []const u8) void {
         if (!self.cdp_trace) return;
         var f = self.cdp_wire orelse return;
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = runtime_io.get();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         var buf: [8704]u8 = undefined;
         const line = std.fmt.bufPrint(
             &buf,
@@ -314,11 +321,12 @@ const Sink = struct {
     fn writeMeta(self: *Sink, opts: InitOpts) !void {
         const path = try std.fs.path.join(self.allocator, &.{ self.run_dir, "meta.json" });
         defer self.allocator.free(path);
-        var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-        defer file.close();
+        const io = runtime_io.get();
+        var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+        defer file.close(io);
 
         var buf: [4096]u8 = undefined;
-        var w = file.writer(&buf);
+        var w = file.writer(io, &buf);
         const iw = &w.interface;
         try iw.writeAll("{\n");
         try iw.print("  \"version\": \"{s}\",\n", .{opts.version});
@@ -344,9 +352,10 @@ const Sink = struct {
     fn updateLatestSymlink(allocator: std.mem.Allocator, base_dir: []const u8, run_dir: []const u8) !void {
         const latest = try std.fs.path.join(allocator, &.{ base_dir, "latest" });
         defer allocator.free(latest);
-        std.fs.cwd().deleteFile(latest) catch {};
+        const io = runtime_io.get();
+        std.Io.Dir.cwd().deleteFile(io, latest) catch {};
         const rel = std.fs.path.basename(run_dir);
-        posix.symlink(rel, latest) catch {};
+        std.Io.Dir.cwd().symLink(io, rel, latest, .{}) catch {};
     }
 };
 

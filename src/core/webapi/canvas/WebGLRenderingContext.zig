@@ -184,19 +184,15 @@ pub const Extension = union(enum) {
     const Kind = blk: {
         const info = @typeInfo(Extension).@"union";
         const fields = info.fields;
-        var items: [fields.len]std.builtin.Type.EnumField = undefined;
+        const TagInt = std.math.IntFittingRange(0, if (fields.len == 0) 0 else fields.len - 1);
+        var field_names: [fields.len][]const u8 = undefined;
+        var field_values: [fields.len]TagInt = undefined;
         for (fields, 0..) |field, i| {
-            items[i] = .{ .name = field.name, .value = i };
+            field_names[i] = field.name;
+            field_values[i] = @intCast(i);
         }
 
-        break :blk @Type(.{
-            .@"enum" = .{
-                .tag_type = std.math.IntFittingRange(0, if (fields.len == 0) 0 else fields.len - 1),
-                .fields = &items,
-                .decls = &.{},
-                .is_exhaustive = true,
-            },
-        });
+        break :blk @Enum(TagInt, .exhaustive, &field_names, &field_values);
     };
 
     /// Returns the `Extension.Kind` by its name.

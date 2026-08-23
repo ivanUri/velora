@@ -31,6 +31,7 @@ const Queue = std.PriorityQueue(Task, void, struct {
 const Scheduler = @This();
 
 _sequence: u64,
+allocator: std.mem.Allocator,
 /// Bumped by `reset`/`deinit` so an in-flight `run`/`runOne` stops after the
 /// current callback instead of peeking a freed PriorityQueue (about:blank
 /// iframe detach mid agent collection → SIGSEGV in runOneFromQueue).
@@ -42,10 +43,11 @@ timers: Queue,
 pub fn init(allocator: std.mem.Allocator) Scheduler {
     return .{
         ._sequence = 0,
+        .allocator = allocator,
         ._generation = 0,
-        .low_priority = Queue.init(allocator, {}),
-        .high_priority = Queue.init(allocator, {}),
-        .timers = Queue.init(allocator, {}),
+        .low_priority = .initContext({}),
+        .high_priority = .initContext({}),
+        .timers = .initContext({}),
     };
 }
 
@@ -54,9 +56,9 @@ pub fn deinit(self: *Scheduler) void {
     finalizeTasks(&self.low_priority);
     finalizeTasks(&self.high_priority);
     finalizeTasks(&self.timers);
-    self.low_priority.deinit();
-    self.high_priority.deinit();
-    self.timers.deinit();
+    self.low_priority.deinit(self.allocator);
+    self.high_priority.deinit(self.allocator);
+    self.timers.deinit(self.allocator);
 }
 
 pub fn reset(self: *Scheduler) void {
@@ -72,18 +74,17 @@ pub fn reset(self: *Scheduler) void {
 /// Remove matching tasks and invoke their finalizers. Used when tearing down a
 /// Worker while deferred script tasks may still be queued on the parent frame.
 pub fn cancelTasks(self: *Scheduler, matcher: *const fn (ctx: *anyopaque, callback: Callback) bool) void {
-    cancelTasksInQueue(&self.high_priority, matcher);
-    cancelTasksInQueue(&self.timers, matcher);
-    cancelTasksInQueue(&self.low_priority, matcher);
+    cancelTasksInQueue(&self.high_priority, self.allocator, matcher);
+    cancelTasksInQueue(&self.timers, self.allocator, matcher);
+    cancelTasksInQueue(&self.low_priority, self.allocator, matcher);
 }
 
-fn cancelTasksInQueue(queue: *Queue, matcher: *const fn (ctx: *anyopaque, callback: Callback) bool) void {
+fn cancelTasksInQueue(queue: *Queue, allocator: std.mem.Allocator, matcher: *const fn (ctx: *anyopaque, callback: Callback) bool) void {
     if (queue.count() == 0) return;
-    const allocator = queue.allocator;
     var kept: std.ArrayList(Task) = .empty;
     defer kept.deinit(allocator);
 
-    while (queue.removeOrNull()) |task| {
+    while (queue.pop()) |task| {
         if (matcher(task.ctx, task.callback)) {
             if (task.finalizer) |func| func(task.ctx);
         } else {
@@ -94,7 +95,7 @@ fn cancelTasksInQueue(queue: *Queue, matcher: *const fn (ctx: *anyopaque, callba
     }
 
     for (kept.items) |task| {
-        queue.add(task) catch {
+        queue.push(allocator, task) catch {
             if (task.finalizer) |func| func(task.ctx);
         };
     }
@@ -120,7 +121,7 @@ pub fn add(self: *Scheduler, ctx: *anyopaque, cb: Callback, run_in_ms: u32, opts
         &self.high_priority;
     const seq = self._sequence + 1;
     self._sequence = seq;
-    return queue.add(.{
+    return queue.push(self.allocator, .{
         .ctx = ctx,
         .callback = cb,
         .sequence = seq,
@@ -223,7 +224,7 @@ fn runOneFromQueue(self: *Scheduler, queue: *Queue, now: u64, gen: u64) !bool {
     const head = queue.peek() orelse return false;
     if (head.run_at > now) return false;
 
-    var task = queue.remove();
+    var task = queue.pop().?;
     if (comptime IS_DEBUG) {
         log.debug(.scheduler, "scheduler.runTask", .{ .name = task.name });
     }
@@ -246,11 +247,11 @@ fn runOneFromQueue(self: *Scheduler, queue: *Queue, now: u64, gen: u64) !bool {
         // Page timers (setTimeout/setInterval) use high_priority via AddOpts;
         // requestIdleCallback stays low. No string matching on task.name.
         if (task.source == .timer) {
-            try self.timers.add(task);
+            try self.timers.push(self.allocator, task);
         } else if (task.low_priority) {
-            try self.low_priority.add(task);
+            try self.low_priority.push(self.allocator, task);
         } else {
-            try self.high_priority.add(task);
+            try self.high_priority.push(self.allocator, task);
         }
     }
     return true;

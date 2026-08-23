@@ -13,6 +13,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const Timer = @import("../../support/timer.zig");
 const builtin = @import("builtin");
 
 const Element = @import("../dom/Element.zig");
@@ -207,7 +208,7 @@ fn waitForActivationHit(root_frame: *Frame, x: f64, y: f64, timeout_ms: u32) !?F
         return null;
     }
 
-    var timer = try std.time.Timer.start();
+    var timer = try Timer.start();
     var runner = try root_frame._session.runner(.{});
 
     while (true) {

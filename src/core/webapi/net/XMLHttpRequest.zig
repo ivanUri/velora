@@ -12,6 +12,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const runtime_io = @import("../../../support/io.zig");
 const RC = @import("../../../support/rc.zig").RC;
 const js = @import("../../js/js.zig");
 
@@ -398,7 +399,7 @@ pub fn getResponseHeader(self: *const XMLHttpRequest, name: []const u8) ?[]const
         if (entry[name.len] != ':') {
             continue;
         }
-        return std.mem.trimLeft(u8, entry[name.len + 1 ..], " ");
+        return std.mem.trimStart(u8, entry[name.len + 1 ..], " ");
     }
     return null;
 }
@@ -632,8 +633,9 @@ fn httpDoneCallback(ctx: *anyopaque) !void {
 /// serialized without retaining transfer or realm memory. Wire-level request
 /// headers are captured separately by `KOKO_WIRE_HEADERS`.
 fn traceErrorExchange(self: *const XMLHttpRequest) !void {
-    const trace_dir = std.posix.getenv("KOKO_HTTP_ERROR_TRACE_DIR") orelse return;
-    try std.fs.cwd().makePath(trace_dir);
+    const trace_dir = runtime_io.getenv("KOKO_HTTP_ERROR_TRACE_DIR") orelse return;
+    const io = runtime_io.get();
+    try std.Io.Dir.cwd().createDirPath(io, trace_dir);
 
     const stem = try std.fmt.allocPrint(
         self._arena,
@@ -657,11 +659,11 @@ fn traceErrorExchange(self: *const XMLHttpRequest) !void {
         .{ trace_dir, stem },
     );
 
-    var metadata = try std.fs.cwd().createFile(metadata_path, .{ .truncate = true });
-    defer metadata.close();
+    const metadata = try std.Io.Dir.cwd().createFile(io, metadata_path, .{ .truncate = true });
+    defer metadata.close(io);
 
     var buf: [4096]u8 = undefined;
-    var writer = metadata.writer(&buf);
+    var writer = metadata.writer(io, &buf);
     try writer.interface.print(
         "method: {s}\nurl: {s}\nresponse-url: {s}\nstatus: {d}\nrequest-body-length: {d}\nresponse-body-length: {d}\nresponse-headers:\n",
         .{
@@ -678,13 +680,13 @@ fn traceErrorExchange(self: *const XMLHttpRequest) !void {
     }
     try writer.interface.flush();
 
-    var request_body_file = try std.fs.cwd().createFile(request_body_path, .{ .truncate = true });
-    defer request_body_file.close();
-    if (self._request_body) |body| try request_body_file.writeAll(body);
+    const request_body_file = try std.Io.Dir.cwd().createFile(io, request_body_path, .{ .truncate = true });
+    defer request_body_file.close(io);
+    if (self._request_body) |body| try request_body_file.writeStreamingAll(io, body);
 
-    var response_body_file = try std.fs.cwd().createFile(response_body_path, .{ .truncate = true });
-    defer response_body_file.close();
-    try response_body_file.writeAll(self._response_data.items);
+    const response_body_file = try std.Io.Dir.cwd().createFile(io, response_body_path, .{ .truncate = true });
+    defer response_body_file.close(io);
+    try response_body_file.writeStreamingAll(io, self._response_data.items);
 
     log.info(.http, "XHR error trace saved", .{
         .url = self._url,

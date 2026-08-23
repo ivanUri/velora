@@ -71,11 +71,11 @@ const State = struct {
 
     fn object(self: *State, root: *DOMNode, fields: std.json.ObjectMap, depth: usize) Error!std.json.Value {
         try self.guard(depth);
-        var result = std.json.ObjectMap.init(self.allocator);
+        var result: std.json.ObjectMap = .{};
         var it = fields.iterator();
         while (it.next()) |entry| {
             const value = try self.field(root, entry.value_ptr.*, depth + 1);
-            try result.put(entry.key_ptr.*, value);
+            try result.put(self.allocator, entry.key_ptr.*, value);
         }
         return .{ .object = result };
     }

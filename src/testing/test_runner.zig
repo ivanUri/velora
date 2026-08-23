@@ -13,6 +13,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const koko = @import("koko");
+const sync = koko.sync;
+const Timer = koko.timer;
 
 const Allocator = std.mem.Allocator;
 
@@ -25,7 +28,9 @@ pub var tracking_allocator: Allocator = undefined;
 
 var RUNNER: *Runner = undefined;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    koko.io.set(init.io);
+    koko.io.setEnviron(init.environ_map);
     var mem: [8192]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&mem);
 
@@ -127,7 +132,7 @@ const Runner = struct {
                 break :blk name;
             };
             defer {
-                self.subtests = .{};
+                self.subtests = .empty;
                 const arena: *std.heap.ArenaAllocator = @ptrCast(@alignCast(self.arena.ptr));
                 _ = arena.reset(.{ .retain_with_limit = 2048 });
             }
@@ -213,8 +218,9 @@ const Runner = struct {
         Printer.fmt("\n", .{});
         // stats
         if (self.env.metrics) {
-            var stdout = std.fs.File.stdout();
-            var writer = stdout.writer(&.{});
+            const stdout = std.Io.File.stdout();
+            var stdout_buffer: [4096]u8 = undefined;
+            var writer = stdout.writer(koko.io.get(), &stdout_buffer);
             const stats = self.ta.stats();
             try std.json.Stringify.value(&.{
                 .{ .name = "browser", .bench = .{
@@ -230,6 +236,7 @@ const Runner = struct {
                     .alloc_size = v8_peak_memory,
                 } },
             }, .{ .whitespace = .indent_2 }, &writer.interface);
+            try writer.interface.flush();
             Printer.fmt("\n", .{});
         }
 
@@ -241,7 +248,7 @@ const Runner = struct {
             Printer.fmt("\n", .{});
         }
 
-        std.posix.exit(if (fail == 0) 0 else 1);
+        std.process.exit(if (fail == 0) 0 else 1);
     }
 };
 
@@ -280,15 +287,17 @@ const Status = enum {
 const SlowTracker = struct {
     const SlowestQueue = std.PriorityDequeue(TestInfo, void, compareTiming);
     max: usize,
+    allocator: Allocator,
     slowest: SlowestQueue,
-    timer: std.time.Timer,
+    timer: Timer,
 
     fn init(allocator: Allocator, count: u32) SlowTracker {
-        const timer = std.time.Timer.start() catch @panic("failed to start timer");
-        var slowest = SlowestQueue.init(allocator, {});
-        slowest.ensureTotalCapacity(count) catch @panic("OOM");
+        const timer = Timer.start() catch @panic("failed to start timer");
+        var slowest = SlowestQueue.initContext({});
+        slowest.ensureTotalCapacity(allocator, count) catch @panic("OOM");
         return .{
             .max = count,
+            .allocator = allocator,
             .timer = timer,
             .slowest = slowest,
         };
@@ -299,8 +308,8 @@ const SlowTracker = struct {
         name: []const u8,
     };
 
-    fn deinit(self: SlowTracker) void {
-        self.slowest.deinit();
+    fn deinit(self: *SlowTracker) void {
+        self.slowest.deinit(self.allocator);
     }
 
     fn startTiming(self: *SlowTracker) void {
@@ -319,7 +328,7 @@ const SlowTracker = struct {
         if (slowest.count() < self.max) {
             // Capacity is fixed to the # of slow tests we want to track
             // If we've tracked fewer tests than this capacity, than always add
-            slowest.add(TestInfo{ .ns = ns, .name = test_name }) catch @panic("failed to track test timing");
+            slowest.push(self.allocator, TestInfo{ .ns = ns, .name = test_name }) catch @panic("failed to track test timing");
             return ns;
         }
 
@@ -334,8 +343,8 @@ const SlowTracker = struct {
         }
 
         // the previous fastest of our slow tests, has been pushed off.
-        _ = slowest.removeMin();
-        slowest.add(TestInfo{ .ns = ns, .name = test_name }) catch @panic("failed to track test timing");
+        _ = slowest.popMin();
+        slowest.push(self.allocator, TestInfo{ .ns = ns, .name = test_name }) catch @panic("failed to track test timing");
         return ns;
     }
 
@@ -343,7 +352,7 @@ const SlowTracker = struct {
         var slowest = self.slowest;
         const count = slowest.count();
         Printer.fmt("Slowest {d} test{s}: \n", .{ count, if (count != 1) "s" else "" });
-        while (slowest.removeMinOrNull()) |info| {
+        while (slowest.popMin()) |info| {
             const ms = @as(f64, @floatFromInt(info.ns)) / 1_000_000.0;
             Printer.fmt("  {d:.2}ms\t{s}\n", .{ ms, info.name });
         }
@@ -381,14 +390,8 @@ const Env = struct {
     }
 
     fn readEnv(allocator: Allocator, key: []const u8) ?[]const u8 {
-        const v = std.process.getEnvVarOwned(allocator, key) catch |err| {
-            if (err == error.EnvironmentVariableNotFound) {
-                return null;
-            }
-            std.log.warn("failed to get env var {s} due to err {}", .{ key, err });
-            return null;
-        };
-        return v;
+        const value = koko.io.getenv(key) orelse return null;
+        return allocator.dupe(u8, value) catch null;
     }
 
     fn readEnvBool(allocator: Allocator, key: []const u8, deflt: bool) bool {
@@ -449,7 +452,7 @@ pub const TrackingAllocator = struct {
     allocated_bytes: usize = 0,
     allocation_count: usize = 0,
     reallocation_count: usize = 0,
-    mutex: std.Thread.Mutex = .{},
+    mutex: sync.Mutex = .{},
 
     const Stats = struct {
         allocated_bytes: usize,

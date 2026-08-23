@@ -35,8 +35,8 @@ _reason: Reason = .undefined,
 _on_abort: ?js.Function.Global = null,
 _event_order: u32 = 0,
 _dependent: bool = false,
-_sources: std.ArrayList(*AbortSignal) = .{},
-_dependents: std.ArrayList(*AbortSignal) = .{},
+_sources: std.ArrayList(*AbortSignal) = .empty,
+_dependents: std.ArrayList(*AbortSignal) = .empty,
 
 pub fn init(exec: *const Execution) !*AbortSignal {
     const order = next_event_order;

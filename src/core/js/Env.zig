@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const sync = @import("../../support/sync.zig");
 
 const js = @import("js.zig");
 const bridge = @import("bridge.zig");
@@ -78,7 +79,16 @@ fn initClassIds() void {
     }
 }
 
-var class_id_once = std.once(initClassIds);
+var class_ids_initialized = false;
+var class_ids_mutex: sync.Mutex = .{};
+
+fn initClassIdsOnce() void {
+    class_ids_mutex.lock();
+    defer class_ids_mutex.unlock();
+    if (class_ids_initialized) return;
+    initClassIds();
+    class_ids_initialized = true;
+}
 
 // The Env maps to a V8 isolate, which represents a isolated sandbox for
 // executing JavaScript. The Env is where we'll define our V8 <-> Zig bindings,
@@ -146,7 +156,7 @@ pub fn init(app: *App, opts: InitOpts) !Env {
     }
 
     // Initialize class IDs once before any V8 work
-    class_id_once.call();
+    initClassIdsOnce();
 
     const allocator = app.allocator;
     const snapshot = &app.snapshot;

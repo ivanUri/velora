@@ -107,7 +107,7 @@ queued_queued_navigation: std.ArrayList(*Frame) = .empty,
 frame: Frame,
 
 // BroadcastChannel registry keyed by "{origin_key}\x1f{channel_name}".
-broadcast_channels: std.StringHashMapUnmanaged(std.ArrayList(*BroadcastChannel)) = .{},
+broadcast_channels: std.StringHashMapUnmanaged(std.ArrayList(*BroadcastChannel)) = .empty,
 
 // Popup Frames opened by window.open. They are top-level browsing contexts
 // (parent == null, no iframe element) but share this Page's factory, arena,
@@ -575,7 +575,7 @@ pub fn broadcastChannelRegistryKey(self: *Page, origin_key: []const u8, name: []
 pub fn registerBroadcastChannel(self: *Page, channel: *BroadcastChannel) !void {
     const gop = try self.broadcast_channels.getOrPut(self.frame_arena, channel.registryKey());
     if (!gop.found_existing) {
-        gop.value_ptr.* = .{};
+        gop.value_ptr.* = .empty;
     }
     try gop.value_ptr.append(self.frame_arena, channel);
 }

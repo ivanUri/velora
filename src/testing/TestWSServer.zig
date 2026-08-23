@@ -13,7 +13,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
-const posix = std.posix;
+const net = @import("../support/net.zig");
+const posix = @import("../support/posix.zig");
+const WaitGroup = @import("../support/wait_group.zig");
 
 const TestWSServer = @This();
 
@@ -31,23 +33,25 @@ pub fn stop(self: *TestWSServer) void {
     self.shutdown.store(true, .release);
     if (self.listener) |socket| {
         switch (@import("builtin").target.os.tag) {
-            .linux => std.posix.shutdown(socket, .recv) catch {},
-            else => std.posix.close(socket),
+            .linux => posix.shutdown(socket, .recv) catch {},
+            else => posix.close(socket),
         }
     }
 }
 
-pub fn run(self: *TestWSServer, wg: *std.Thread.WaitGroup) void {
+pub fn run(self: *TestWSServer, wg: *WaitGroup) void {
     self.runImpl(wg) catch |err| {
         std.debug.print("WebSocket echo server error: {}\n", .{err});
     };
 }
 
-fn runImpl(self: *TestWSServer, wg: *std.Thread.WaitGroup) !void {
+fn runImpl(self: *TestWSServer, wg: *WaitGroup) !void {
+    var ready = false;
+    defer if (!ready) wg.finish();
     const socket = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
     errdefer posix.close(socket);
 
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9584);
+    const addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 9584);
 
     try posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
     try posix.bind(socket, &addr.any, addr.getOsSockLen());
@@ -56,6 +60,7 @@ fn runImpl(self: *TestWSServer, wg: *std.Thread.WaitGroup) !void {
     self.listener = socket;
     self.shutdown.store(false, .release);
     wg.finish();
+    ready = true;
 
     while (!self.shutdown.load(.acquire)) {
         var client_addr: posix.sockaddr = undefined;

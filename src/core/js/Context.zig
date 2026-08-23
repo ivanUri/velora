@@ -113,7 +113,7 @@ call_depth: usize = 0,
 /// checkpoint or the pending exception is lost before script try/catch runs.
 pending_callback_exception: bool = false,
 
-terminal_resources: std.ArrayList(TerminalResource) = .{},
+terminal_resources: std.ArrayList(TerminalResource) = .empty,
 
 // When a Caller is active (V8->Zig callback), this points to its Local.
 // When null, Zig->V8 calls must create a js.Local.Scope and initialize via
@@ -165,7 +165,7 @@ scheduler: Scheduler,
 /// current JavaScript job has had a chance to attach a handler. Browsers defer
 /// the DOM event until a later task and cancel it when V8 subsequently reports
 /// `kPromiseHandlerAddedAfterReject` in the same turn.
-pending_promise_rejections: std.ArrayListUnmanaged(*PendingPromiseRejection) = .{},
+pending_promise_rejections: std.ArrayListUnmanaged(*PendingPromiseRejection) = .empty,
 
 // Execution context for worker-compatible APIs. This provides a common
 // interface that works in both Page and Worker contexts.
@@ -486,7 +486,7 @@ pub fn stringToPersistedFunction(
     self: *Context,
     function_body: []const u8,
     comptime parameter_names: []const []const u8,
-    extensions: []const v8.Object,
+    extensions: []const *const v8.Object,
 ) !js.Function.Global {
     var ls: js.Local.Scope = undefined;
     self.localScope(&ls);

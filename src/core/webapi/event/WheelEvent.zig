@@ -67,7 +67,7 @@ pub fn init(typ: []const u8, _opts: ?Options, frame: *Frame) !*WheelEvent {
             ._shift_key = opts.shiftKey,
             ._alt_key = opts.altKey,
             ._meta_key = opts.metaKey,
-            ._button = std.meta.intToEnum(MouseEvent.MouseButton, opts.button) catch return error.TypeError,
+            ._button = std.enums.fromInt(MouseEvent.MouseButton, opts.button) orelse return error.TypeError,
             ._buttons = opts.buttons,
             ._related_target = opts.relatedTarget,
         },

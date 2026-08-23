@@ -12,6 +12,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const runtime_io = @import("../support/io.zig");
+const Timer = @import("../support/timer.zig");
+const WaitGroup = @import("../support/wait_group.zig");
 
 const log = @import("../support/log.zig");
 const Allocator = std.mem.Allocator;
@@ -352,7 +355,8 @@ pub fn htmlRunner(comptime path: []const u8, opts: HtmlRunnerOpts) !void {
     defer reset();
 
     const root = try std.fs.path.joinZ(arena_allocator, &.{ WEB_API_TEST_ROOT, path });
-    const stat = std.fs.cwd().statFile(root) catch |err| switch (err) {
+    const io = runtime_io.get();
+    const stat = std.Io.Dir.cwd().statFile(io, root, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -366,15 +370,15 @@ pub fn htmlRunner(comptime path: []const u8, opts: HtmlRunnerOpts) !void {
             try runWebApiTest(root);
         },
         .directory => {
-            var dir = try std.fs.cwd().openDir(root, .{
+            const dir = try std.Io.Dir.cwd().openDir(io, root, .{
                 .iterate = true,
-                .no_follow = true,
+                .follow_symlinks = false,
                 .access_sub_paths = false,
             });
-            defer dir.close();
+            defer dir.close(io);
 
             var it = dir.iterateAssumeFirstIteration();
-            while (try it.next()) |entry| {
+            while (try it.next(io)) |entry| {
                 if (entry.kind != .file) {
                     continue;
                 }
@@ -426,7 +430,7 @@ fn runWebApiTest(test_file: [:0]const u8) !void {
     try runner.wait(.{ .ms = 2000, .until = .load });
 
     var wait_ms: u32 = 2000;
-    var timer = try std.time.Timer.start();
+    var timer = try Timer.start();
     while (true) {
         var try_catch: js.TryCatch = undefined;
         try_catch.init(&ls.local);
@@ -458,7 +462,7 @@ fn runWebApiTest(test_file: [:0]const u8) !void {
             return error.TestTimedOut;
         }
         wait_ms -= @intCast(ms_elapsed);
-        std.Thread.sleep(std.time.ns_per_ms * sleep_ms);
+        Timer.sleepNanoseconds(std.time.ns_per_ms * sleep_ms);
     }
 }
 
@@ -467,7 +471,7 @@ const PageTestOpts = struct {
 };
 pub fn pageTest(comptime test_file: []const u8, opts: PageTestOpts) !*Frame {
     const fixture_path = try std.fs.path.joinZ(arena_allocator, &.{ WEB_API_TEST_ROOT, test_file });
-    std.fs.cwd().access(fixture_path, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(runtime_io.get(), fixture_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -527,7 +531,7 @@ test "tests:beforeAll" {
 
     test_session = try test_browser.newSession(test_notification);
 
-    var wg: std.Thread.WaitGroup = .{};
+    var wg: WaitGroup = .{};
     wg.startMany(3);
 
     test_cdp_server_thread = try std.Thread.spawn(.{}, serveCDP, .{&wg});
@@ -593,14 +597,17 @@ test "tests:afterAll" {
     test_config.deinit(@import("root").tracking_allocator);
 }
 
-fn serveCDP(wg: *std.Thread.WaitGroup) !void {
-    const address = try std.net.Address.parseIp("127.0.0.1", 9583);
+fn serveCDP(wg: *WaitGroup) !void {
+    var ready = false;
+    defer if (!ready) wg.finish();
+    const address = try @import("../support/net.zig").Address.parseIp("127.0.0.1", 9583);
 
     test_cdp_server = Server.init(test_app, address) catch |err| {
         std.debug.print("CDP server error: {}", .{err});
         return err;
     };
     wg.finish();
+    ready = true;
 
     test_app.network.run();
 }
@@ -612,7 +619,7 @@ fn testHTTPHandler(req: *std.http.Server.Request) !void {
         // Keep the response deterministic but non-zero latency so a
         // wait_until=done regression test can observe whether lazy activation
         // actually owns the network request before returning.
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        Timer.sleepNanoseconds(50 * std.time.ns_per_ms);
         const png = [_]u8{
             0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
             0,    0,   0,   13,  'I',  'H',  'D',  'R',
@@ -637,7 +644,7 @@ fn testHTTPHandler(req: *std.http.Server.Request) !void {
         // Ensure the entry module reaches V8 instantiation while this import is
         // still in flight. Its terminal callback must be allowed to run after
         // the outer entry-script HTTP callback unwinds.
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        Timer.sleepNanoseconds(50 * std.time.ns_per_ms);
         return req.respond("export const dependencyValue = 42;", .{
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "application/javascript" },
@@ -658,7 +665,7 @@ fn testHTTPHandler(req: *std.http.Server.Request) !void {
         try res.writer.flush();
         try res.flush();
 
-        std.Thread.sleep(1500 * std.time.ns_per_ms);
+        Timer.sleepNanoseconds(1500 * std.time.ns_per_ms);
         try res.writer.writeAll("second");
         try res.writer.flush();
         return res.end();

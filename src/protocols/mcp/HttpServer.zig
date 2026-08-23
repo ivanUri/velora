@@ -1,5 +1,7 @@
 const std = @import("std");
-const posix = std.posix;
+const posix = @import("../../support/posix.zig");
+const net = @import("../../support/net.zig");
+const sync = @import("../../support/sync.zig");
 
 const App = @import("../../runtime/App.zig");
 const log = @import("../../support/log.zig");
@@ -18,8 +20,8 @@ const Job = struct {
     assigned_id: [32]u8 = undefined,
     assigned_len: usize = 0,
     status: u16 = 200,
-    mutex: std.Thread.Mutex = .{},
-    condition: std.Thread.Condition = .{},
+    mutex: sync.Mutex = .{},
+    condition: sync.Condition = .{},
     done: bool = false,
     next: ?*Job = null,
 
@@ -48,8 +50,8 @@ const Job = struct {
 };
 
 const Queue = struct {
-    mutex: std.Thread.Mutex = .{},
-    condition: std.Thread.Condition = .{},
+    mutex: sync.Mutex = .{},
+    condition: sync.Condition = .{},
     head: ?*Job = null,
     tail: ?*Job = null,
     closed: bool = false,
@@ -89,12 +91,12 @@ const Queue = struct {
 
 allocator: std.mem.Allocator,
 app: *App,
-address: std.net.Address,
+address: net.Address,
 max_sessions: usize,
 queue: Queue,
 worker: std.Thread,
-worker_mutex: std.Thread.Mutex = .{},
-worker_condition: std.Thread.Condition = .{},
+worker_mutex: sync.Mutex = .{},
+worker_condition: sync.Condition = .{},
 worker_ready: bool = false,
 worker_ok: bool = false,
 active_connections: std.atomic.Value(usize) = .init(0),
@@ -102,7 +104,7 @@ active_connections: std.atomic.Value(usize) = .init(0),
 pub fn init(
     allocator: std.mem.Allocator,
     app: *App,
-    address: std.net.Address,
+    address: net.Address,
     max_sessions: usize,
 ) !*Self {
     const self = try allocator.create(Self);
@@ -142,7 +144,7 @@ pub fn deinit(self: *Self) void {
     self.shutdown();
     self.worker.join();
     while (self.active_connections.load(.acquire) != 0) {
-        std.Thread.sleep(std.time.ns_per_ms);
+        @import("../../support/timer.zig").sleepNanoseconds(std.time.ns_per_ms);
     }
     self.allocator.destroy(self);
 }
@@ -237,15 +239,14 @@ fn handleConnection(self: *Self, socket: posix.socket_t) void {
     posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &timeout) catch {};
     posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.SNDTIMEO, &timeout) catch {};
 
-    var stream: std.net.Stream = .{ .handle = socket };
-    const request = readRequest(self.allocator, &stream) catch {
-        writeResponse(&stream, 400, null, "") catch {};
+    const request = readRequest(self.allocator, socket) catch {
+        writeResponse(socket, 400, null, "") catch {};
         return;
     };
     defer self.allocator.free(request.storage);
 
     if (!std.mem.eql(u8, request.path, "/mcp")) {
-        writeResponse(&stream, 404, null, "") catch {};
+        writeResponse(socket, 404, null, "") catch {};
         return;
     }
 
@@ -255,16 +256,16 @@ fn handleConnection(self: *Self, socket: posix.socket_t) void {
         .session_id = request.session_id,
     };
     if (!std.mem.eql(u8, request.method, "POST") and job.kind != .close) {
-        writeResponse(&stream, 405, null, "") catch {};
+        writeResponse(socket, 405, null, "") catch {};
         return;
     }
     self.queue.push(&job) catch {
-        writeResponse(&stream, 503, null, "") catch {};
+        writeResponse(socket, 503, null, "") catch {};
         return;
     };
     job.wait();
     defer if (job.response) |response| self.allocator.free(response);
-    writeResponse(&stream, job.status, if (job.assigned_len > 0) job.assigned() else null, job.response orelse "") catch {};
+    writeResponse(socket, job.status, if (job.assigned_len > 0) job.assigned() else null, job.response orelse "") catch {};
 }
 
 const Request = struct {
@@ -275,7 +276,7 @@ const Request = struct {
     body: []const u8,
 };
 
-fn readRequest(allocator: std.mem.Allocator, stream: *std.net.Stream) !Request {
+fn readRequest(allocator: std.mem.Allocator, socket: posix.socket_t) !Request {
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(allocator);
     var header_end: ?usize = null;
@@ -283,7 +284,7 @@ fn readRequest(allocator: std.mem.Allocator, stream: *std.net.Stream) !Request {
     var chunk: [8192]u8 = undefined;
 
     while (true) {
-        const count = try stream.read(&chunk);
+        const count = try posix.read(socket, &chunk);
         if (count == 0) return error.IncompleteRequest;
         try bytes.appendSlice(allocator, chunk[0..count]);
         if (bytes.items.len > max_request_bytes + max_header_bytes) return error.RequestTooLarge;
@@ -332,7 +333,7 @@ fn parseHeader(headers: []const u8, wanted: []const u8) ?[]const u8 {
     return null;
 }
 
-fn writeResponse(stream: *std.net.Stream, status: u16, session_id: ?[]const u8, body: []const u8) !void {
+fn writeResponse(socket: posix.socket_t, status: u16, session_id: ?[]const u8, body: []const u8) !void {
     const reason = switch (status) {
         200 => "OK",
         202 => "Accepted",
@@ -358,8 +359,13 @@ fn writeResponse(stream: *std.net.Stream, status: u16, session_id: ?[]const u8, 
             "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
             .{ status, reason, body.len },
         );
-    try stream.writeAll(rendered);
-    if (body.len > 0) try stream.writeAll(body);
+    try writeAll(socket, rendered);
+    if (body.len > 0) try writeAll(socket, body);
+}
+
+fn writeAll(socket: posix.socket_t, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) offset += try posix.write(socket, bytes[offset..]);
 }
 
 const testing = @import("../../testing/testing.zig");

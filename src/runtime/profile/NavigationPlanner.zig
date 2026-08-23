@@ -1,4 +1,5 @@
 const std = @import("std");
+const runtime_io = @import("../../support/io.zig");
 const PolicyRegistry = @import("PolicyRegistry.zig");
 const ProfileStore = @import("ProfileStore.zig");
 
@@ -183,7 +184,7 @@ fn appendQueryParamIfMissing(allocator: Allocator, url: []const u8, name: []cons
     if (std.mem.indexOf(u8, url, marker) != null) return try allocator.dupeZ(u8, url);
 
     var rand: [16]u8 = undefined;
-    std.crypto.random.bytes(&rand);
+    runtime_io.get().random(&rand);
     const enc = std.base64.url_safe_no_pad.Encoder;
     var value_buf: [32]u8 = undefined;
     const value = value_buf[0..enc.calcSize(rand.len)];

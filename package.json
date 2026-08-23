@@ -10,6 +10,7 @@
     "benchmark:smoke": "zig build benchmark -Doptimize=ReleaseFast -- --quick",
     "benchmark:real-sites": "zig build benchmark -Doptimize=ReleaseFast -- --suite real-sites --allow-failures",
     "benchmark:test": "node --test bench/tests/*.test.mjs",
+    "test:koko-pool": "node --test bench/tests/koko-pool.test.mjs",
     "export-site": "node scripts/export-site.js",
     "test:misa": "node scripts/test-misa-id.js",
     "test:misa:login": "node scripts/test-misa-login.mjs"

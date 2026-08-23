@@ -5,6 +5,7 @@
 //! must never be represented as one.
 
 const std = @import("std");
+const runtime_io = @import("../../support/io.zig");
 
 pub const schema_version: u32 = 1;
 pub const manifest_filename = "manifest.json";
@@ -25,17 +26,20 @@ pub const Manifest = struct {
 };
 
 pub fn write(directory: []const u8, manifest: Manifest) !void {
-    try std.fs.cwd().makePath(directory);
+    const io = runtime_io.get();
+    try std.Io.Dir.cwd().createDirPath(io, directory);
     const path = try std.fs.path.join(std.heap.page_allocator, &.{ directory, manifest_filename });
     defer std.heap.page_allocator.free(path);
 
     var buffer: [8192]u8 = undefined;
-    var file = try std.fs.cwd().atomicFile(path, .{ .make_path = true, .write_buffer = &buffer });
-    defer file.deinit();
-    try std.json.Stringify.value(manifest, .{}, &file.file_writer.interface);
-    try file.file_writer.interface.writeByte('\n');
-    try file.file_writer.file.sync();
-    try file.renameIntoPlace();
+    var file = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .make_path = true, .replace = true });
+    defer file.deinit(io);
+    var file_writer = file.file.writer(io, &buffer);
+    try std.json.Stringify.value(manifest, .{}, &file_writer.interface);
+    try file_writer.interface.writeByte('\n');
+    try file_writer.interface.flush();
+    try file.file.sync(io);
+    try file.replace(io);
 }
 
 /// Validate only the checkpoint format. Restoring browser state remains the
@@ -44,7 +48,7 @@ pub fn write(directory: []const u8, manifest: Manifest) !void {
 pub fn validate(allocator: std.mem.Allocator, directory: []const u8) !void {
     const path = try std.fs.path.join(allocator, &.{ directory, manifest_filename });
     defer allocator.free(path);
-    const raw = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024);
+    const raw = try std.Io.Dir.cwd().readFileAlloc(runtime_io.get(), path, allocator, .limited(64 * 1024));
     defer allocator.free(raw);
     const parsed = try std.json.parseFromSlice(struct { schemaVersion: u32, kind: []const u8 }, allocator, raw, .{
         .ignore_unknown_fields = true,

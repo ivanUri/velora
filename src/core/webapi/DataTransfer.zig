@@ -29,7 +29,7 @@ pub fn registerTypes() []const type {
 
 _arena: Allocator,
 _rc: RC(u32) = .{},
-_items: std.ArrayList(*DataTransferItem) = .{},
+_items: std.ArrayList(*DataTransferItem) = .empty,
 _item_list: *DataTransferItemList,
 _files: *FileList,
 _drop_effect: []const u8 = "none",
@@ -133,7 +133,7 @@ pub fn getItems(self: *DataTransfer) *DataTransferItemList {
 }
 
 pub fn getTypes(self: *DataTransfer, frame: *Frame) ![][]const u8 {
-    var out: std.ArrayList([]const u8) = .{};
+    var out: std.ArrayList([]const u8) = .empty;
     var has_files = false;
     for (self._items.items) |it| {
         switch (it._kind) {

@@ -38,7 +38,10 @@
 //!   local_pref: IPv4 default interface = 65535, others lower
 
 const std = @import("std");
-const posix = std.posix;
+const net = @import("../../../../support/net.zig");
+const posix = @import("../../../../support/posix.zig");
+const runtime_io = @import("../../../../support/io.zig");
+const datetime = @import("../../../../support/datetime.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
@@ -92,9 +95,9 @@ pub const Candidate = struct {
     foundation_len: u8,
     component: u8,
     priority: u32,
-    addr: std.net.Address,
+    addr: net.Address,
     typ: CandidateType,
-    related_addr: ?std.net.Address,
+    related_addr: ?net.Address,
     expose: bool = true,
     temporary_ipv6: bool = false,
 };
@@ -177,7 +180,7 @@ _gathering: GatheringState,
 _connection: ConnectionState,
 
 // STUN srflx gathering
-_stun_server: ?std.net.Address,
+_stun_server: ?net.Address,
 _stun_state: StunState,
 _stun_tid: [12]u8,
 _stun_sent_ms: u64,
@@ -206,14 +209,14 @@ pub fn init(
     errdefer posix.close(sock);
 
     // Bind to 0.0.0.0:0 — OS assigns ephemeral port
-    var addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
+    var addr = net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
     try posix.bind(sock, &addr.any, addr.getOsSockLen());
 
     // Read back assigned port
     var bound: posix.sockaddr.storage = undefined;
     var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
     try posix.getsockname(sock, @ptrCast(&bound), &bound_len);
-    const bound_addr = std.net.Address.initPosix(@ptrCast(@alignCast(&bound)));
+    const bound_addr = net.Address.initPosix(@ptrCast(@alignCast(&bound)));
     const port = bound_addr.getPort();
 
     var self = IceAgent{
@@ -228,7 +231,7 @@ pub fn init(
         ._sock = sock,
         ._sock_port = port,
         ._role = role,
-        ._tiebreaker = std.crypto.random.int(u64),
+        ._tiebreaker = randomU64(),
         ._local = .{},
         ._remote = .{},
         ._pairs = .{},
@@ -277,7 +280,7 @@ pub fn setRemoteCredentials(
 
 /// Begin ICE gathering. Called from the network thread after
 /// setLocalDescription has been processed.
-pub fn startGathering(self: *IceAgent, stun_server: ?std.net.Address) !void {
+pub fn startGathering(self: *IceAgent, stun_server: ?net.Address) !void {
     self._gathering = .gathering;
     self._stun_server = stun_server;
 
@@ -360,7 +363,7 @@ pub fn tick(self: *IceAgent, now_ms: u64) !void {
 
 /// Process an incoming UDP datagram. Returns true if consumed (STUN),
 /// false if it should be forwarded to DTLS.
-pub fn handleIncoming(self: *IceAgent, data: []const u8, from: std.net.Address, now_ms: u64) !bool {
+pub fn handleIncoming(self: *IceAgent, data: []const u8, from: net.Address, now_ms: u64) !bool {
     // STUN magic cookie at bytes 4-7
     if (data.len >= 8) {
         const magic = std.mem.readInt(u32, data[4..8], .big);
@@ -382,7 +385,7 @@ fn gatherHostCandidates(self: *IceAgent) !usize {
     if (net_c.getifaddrs(&ifaddr) != 0) {
         // Fallback: add loopback only
         return self.addHostCandidate(
-            std.net.Address.initIp4(.{ 127, 0, 0, 1 }, self._sock_port),
+            net.Address.initIp4(.{ 127, 0, 0, 1 }, self._sock_port),
             65534,
             false,
         );
@@ -401,7 +404,7 @@ fn gatherHostCandidates(self: *IceAgent) !usize {
         if (sa_generic.family == posix.AF.INET) {
             const sin: *const posix.sockaddr.in = @ptrCast(@alignCast(sa_generic));
             const ip_bytes: [4]u8 = @bitCast(sin.addr);
-            const addr = std.net.Address.initIp4(ip_bytes, self._sock_port);
+            const addr = net.Address.initIp4(ip_bytes, self._sock_port);
             // local_pref: default route interface gets higher pref
             const local_pref: u16 = if (isDefaultRouteIface(iface.ifa_name)) 65535 else 65000;
             _ = try self.addHostCandidate(addr, local_pref, false);
@@ -411,7 +414,7 @@ fn gatherHostCandidates(self: *IceAgent) !usize {
             const ip_bytes: [16]u8 = sin6.addr;
             // Skip link-local (fe80::)
             if (ip_bytes[0] == 0xFE and ip_bytes[1] == 0x80) continue;
-            const addr = std.net.Address.initIp6(ip_bytes, self._sock_port, sin6.flowinfo, sin6.scope_id);
+            const addr = net.Address.initIp6(ip_bytes, self._sock_port, sin6.flowinfo, sin6.scope_id);
             _ = try self.addHostCandidate(
                 addr,
                 64000,
@@ -426,7 +429,7 @@ fn gatherHostCandidates(self: *IceAgent) !usize {
     if (count == 0) {
         // Absolute fallback
         _ = try self.addHostCandidate(
-            std.net.Address.initIp4(.{ 127, 0, 0, 1 }, self._sock_port),
+            net.Address.initIp4(.{ 127, 0, 0, 1 }, self._sock_port),
             65534,
             false,
         );
@@ -460,7 +463,7 @@ fn applyIpv6ExposurePreference(candidates: []Candidate) void {
 
 fn addHostCandidate(
     self: *IceAgent,
-    addr: std.net.Address,
+    addr: net.Address,
     local_pref: u16,
     temporary_ipv6: bool,
 ) !usize {
@@ -556,7 +559,7 @@ fn handleSrflxResponse(self: *IceAgent, resp: StunClient.BindingResponse) !void 
     // (IPv4 srflx must not cite an IPv6 host as related).
     const base_addr = blk: {
         const want_v4 = resp.mapped_addr.any.family == std.posix.AF.INET;
-        var fallback: ?std.net.Address = null;
+        var fallback: ?net.Address = null;
         for (self._local.slice()) |*c| {
             if (c.typ != .host) continue;
             const is_v4 = c.addr.any.family == std.posix.AF.INET;
@@ -677,7 +680,7 @@ fn sendConnectivityCheck(self: *IceAgent, pair_idx: usize, now_ms: u64) !void {
 // Private: STUN message dispatch
 // ---------------------------------------------------------------------------
 
-fn handleStunMessage(self: *IceAgent, data: []const u8, from: std.net.Address, now_ms: u64) !bool {
+fn handleStunMessage(self: *IceAgent, data: []const u8, from: net.Address, now_ms: u64) !bool {
     if (data.len < 2) return false;
 
     const msg_type_raw = std.mem.readInt(u16, data[0..2], .big);
@@ -735,7 +738,7 @@ fn handleCheckResponse(self: *IceAgent, data: []const u8, now_ms: u64) !void {
     }
 }
 
-fn handleInboundCheck(self: *IceAgent, data: []const u8, from: std.net.Address, now_ms: u64) !void {
+fn handleInboundCheck(self: *IceAgent, data: []const u8, from: net.Address, now_ms: u64) !void {
     _ = now_ms;
 
     // Verify MESSAGE-INTEGRITY with our local password
@@ -756,7 +759,7 @@ fn handleInboundCheck(self: *IceAgent, data: []const u8, from: std.net.Address, 
     };
 }
 
-fn buildBindingSuccessResponse(buf: []u8, tid: *const [12]u8, mapped: std.net.Address, pwd: []const u8) !usize {
+fn buildBindingSuccessResponse(buf: []u8, tid: *const [12]u8, mapped: net.Address, pwd: []const u8) !usize {
     if (buf.len < 20) return error.AttributeOverflow;
 
     std.mem.writeInt(u16, buf[0..2], @intFromEnum(StunClient.MessageType.binding_success), .big);
@@ -784,7 +787,7 @@ fn buildBindingSuccessResponse(buf: []u8, tid: *const [12]u8, mapped: std.net.Ad
     return pos;
 }
 
-fn writeXorMappedAddress(buf: []u8, pos: usize, addr: std.net.Address, tid: *const [12]u8) !usize {
+fn writeXorMappedAddress(buf: []u8, pos: usize, addr: net.Address, tid: *const [12]u8) !usize {
     _ = tid;
     if (pos + 4 + 8 > buf.len) return error.AttributeOverflow;
     std.mem.writeInt(u16, buf[pos..][0..2], @intFromEnum(StunClient.AttributeType.xor_mapped_address), .big);
@@ -818,7 +821,7 @@ fn computeHmacSha1ForResponse(msg: []const u8, key: []const u8, out: *[20]u8) vo
 // Private: event emission helpers
 // ---------------------------------------------------------------------------
 
-fn formatCandidateAddress(addr: std.net.Address, out: *[64]u8) ?u8 {
+fn formatCandidateAddress(addr: net.Address, out: *[64]u8) ?u8 {
     switch (addr.any.family) {
         posix.AF.INET => {
             const sin: *const posix.sockaddr.in = @ptrCast(@alignCast(&addr.any));
@@ -886,7 +889,7 @@ fn emitCandidate(self: *IceAgent, cand: *const Candidate) !void {
     self._event_queue.push(node);
 }
 
-fn isPrivateOrLocalAddress(addr: std.net.Address) bool {
+fn isPrivateOrLocalAddress(addr: net.Address) bool {
     switch (addr.any.family) {
         posix.AF.INET => {
             const sin: *const posix.sockaddr.in = @ptrCast(@alignCast(&addr.any));
@@ -932,7 +935,7 @@ pub fn computePriority(type_pref: u24, local_pref: u16, component_id: u8) u32 {
         (256 - @as(u32, component_id));
 }
 
-fn addressFamilyMatches(a: std.net.Address, b: std.net.Address) bool {
+fn addressFamilyMatches(a: net.Address, b: net.Address) bool {
     return a.any.family == b.any.family;
 }
 
@@ -961,7 +964,13 @@ fn pwdLen(buf: [24]u8) usize {
 }
 
 fn currentMs() u64 {
-    return @intCast(std.time.milliTimestamp());
+    return datetime.milliTimestamp(.monotonic);
+}
+
+fn randomU64() u64 {
+    var bytes: [8]u8 = undefined;
+    runtime_io.get().random(&bytes);
+    return std.mem.readInt(u64, &bytes, .little);
 }
 
 test "proxy network policy completes ICE without direct candidates" {
@@ -979,7 +988,7 @@ test "proxy network policy completes ICE without direct candidates" {
 
     // Supplying a STUN address must not matter: the network-context policy
     // owns whether a direct UDP route may be used.
-    try agent.startGathering(std.net.Address.initIp4(.{ 203, 0, 113, 1 }, 3478));
+    try agent.startGathering(net.Address.initIp4(.{ 203, 0, 113, 1 }, 3478));
 
     try std.testing.expectEqual(@as(usize, 0), agent._local.len);
     try std.testing.expectEqual(GatheringState.complete, agent._gathering);
@@ -1004,7 +1013,7 @@ test "proxy policy never emits a synthetic candidate" {
     );
     defer agent.deinit();
 
-    try agent.startGathering(std.net.Address.initIp4(.{ 198, 51, 100, 1 }, 3478));
+    try agent.startGathering(net.Address.initIp4(.{ 198, 51, 100, 1 }, 3478));
     try std.testing.expectEqual(@as(usize, 0), agent._local.len);
     try std.testing.expectEqual(StunState.idle, agent._stun_state);
 
@@ -1015,7 +1024,7 @@ test "proxy policy never emits a synthetic candidate" {
 }
 
 test "ICE exposure canonicalizes IPv6 and classifies local addresses" {
-    const ipv6 = try std.net.Address.parseIp(
+    const ipv6 = try net.Address.parseIp(
         "2402:0800:61c3:c20a:0197:d6e9:3856:5d5e",
         50689,
     );
@@ -1028,18 +1037,18 @@ test "ICE exposure canonicalizes IPv6 and classifies local addresses" {
     );
 
     try std.testing.expect(isPrivateOrLocalAddress(
-        try std.net.Address.parseIp("192.168.1.21", 1234),
+        try net.Address.parseIp("192.168.1.21", 1234),
     ));
     try std.testing.expect(isPrivateOrLocalAddress(
-        try std.net.Address.parseIp("fd00::1", 1234),
+        try net.Address.parseIp("fd00::1", 1234),
     ));
     try std.testing.expect(!isPrivateOrLocalAddress(ipv6));
 }
 
 test "ICE exposure prefers OS temporary IPv6 without removing transport state" {
-    const stable = try std.net.Address.parseIp("2001:db8::1", 5000);
-    const temporary = try std.net.Address.parseIp("2001:db8::2", 5000);
-    const ipv4 = try std.net.Address.parseIp("198.51.100.8", 5000);
+    const stable = try net.Address.parseIp("2001:db8::1", 5000);
+    const temporary = try net.Address.parseIp("2001:db8::2", 5000);
+    const ipv4 = try net.Address.parseIp("198.51.100.8", 5000);
     var candidates = [_]Candidate{
         .{
             .foundation = std.mem.zeroes([32]u8),

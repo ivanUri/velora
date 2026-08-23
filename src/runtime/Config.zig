@@ -13,6 +13,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const runtime_io = @import("../support/io.zig");
 const ProfileStore = @import("profile/ProfileStore.zig");
 const ProfilePaths = @import("profile/ProfilePaths.zig");
 const ProfileManager = @import("profile/ProfileManager.zig");
@@ -73,7 +74,7 @@ pub const ResourcePolicy = enum {
     }
 };
 
-fn resourcePolicyValidator(_: Allocator, args: *std.process.ArgIterator) !?ResourcePolicy {
+fn resourcePolicyValidator(_: Allocator, args: *cli.ArgIterator) !?ResourcePolicy {
     const raw = args.next() orelse {
         log.fatal(.app, "missing argument value", .{ .arg = "--resource-policy" });
         return error.MissingArgument;
@@ -89,7 +90,7 @@ fn resourcePolicyValidator(_: Allocator, args: *std.process.ArgIterator) !?Resou
     return error.InvalidArgument;
 }
 
-fn logFilterScopesValidator(allocator: Allocator, args: *std.process.ArgIterator, list: *std.ArrayList(log.Scope)) !void {
+fn logFilterScopesValidator(allocator: Allocator, args: *cli.ArgIterator, list: *std.ArrayList(log.Scope)) !void {
     const str = args.next() orelse return error.InvalidOption;
 
     var it = std.mem.splitScalar(u8, str, ',');
@@ -103,7 +104,7 @@ fn logFilterScopesValidator(allocator: Allocator, args: *std.process.ArgIterator
     }
 }
 
-fn logLevelValidator(_: Allocator, args: *std.process.ArgIterator) !?log.Level {
+fn logLevelValidator(_: Allocator, args: *cli.ArgIterator) !?log.Level {
     const str = args.next() orelse return error.MissingArgument;
     if (std.mem.eql(u8, str, "error")) {
         return .err;
@@ -115,7 +116,7 @@ fn logLevelValidator(_: Allocator, args: *std.process.ArgIterator) !?log.Level {
     };
 }
 
-fn logDirValidator(allocator: Allocator, args: *std.process.ArgIterator) !?[]const u8 {
+fn logDirValidator(allocator: Allocator, args: *cli.ArgIterator) !?[]const u8 {
     var peek_it = args.*;
     if (peek_it.next()) |val| {
         if (val.len > 0 and val[0] != '-') {
@@ -171,7 +172,7 @@ const CommonOptions = .{
     .{ .name = "storage_sqlite_path", .type = ?[:0]const u8 },
 };
 
-fn dumpValidator(_: Allocator, args: *std.process.ArgIterator) !?DumpFormat {
+fn dumpValidator(_: Allocator, args: *cli.ArgIterator) !?DumpFormat {
     // Peek next argument.
     var peek_args = args.*;
     if (peek_args.next()) |next_arg| {
@@ -189,13 +190,13 @@ fn dumpValidator(_: Allocator, args: *std.process.ArgIterator) !?DumpFormat {
     return .html;
 }
 
-fn waitScriptFileValidator(allocator: Allocator, args: *std.process.ArgIterator) !?[:0]const u8 {
+fn waitScriptFileValidator(allocator: Allocator, args: *cli.ArgIterator) !?[:0]const u8 {
     const path = args.next() orelse {
         log.fatal(.app, "missing argument value", .{ .arg = "--wait-script-file" });
         return error.InvalidArgument;
     };
 
-    return std.fs.cwd().readFileAllocOptions(allocator, path, 1024 * 1024, null, .of(u8), 0) catch |err| {
+    return std.Io.Dir.cwd().readFileAllocOptions(runtime_io.get(), path, allocator, .limited(1024 * 1024), .of(u8), 0) catch |err| {
         log.fatal(.app, "failed to read file", .{ .arg = "--wait-script-file", .path = path, .err = err });
         return error.InvalidArgument;
     };
@@ -212,6 +213,10 @@ const Commands = cli.Builder(.{
             .{ .name = "timeout", .type = ?u31 },
             .{ .name = "cdp_max_connections", .type = u16, .default = 16 },
             .{ .name = "cdp_max_pending_connections", .type = u16, .default = 128 },
+            // Reclaim a CDP worker's V8 heap before long-lived sessions can
+            // retain an unbounded site heap.
+            .{ .name = "worker_max_pages", .type = u32, .default = 1 },
+            .{ .name = "worker_max_rss", .type = u64, .default = 2 * 1024 * 1024 * 1024 },
         },
         .shared_options = CommonOptions,
     },
@@ -381,7 +386,7 @@ fn ensureDefaultHttpCacheDir(self: *Config, allocator: Allocator) !void {
     const cache = try self.profile_paths.cacheDirAlloc();
     defer self.profile_paths.allocator.free(cache);
     self.http_cache_dir_default = try allocator.dupe(u8, cache);
-    try std.fs.cwd().makePath(self.http_cache_dir_default.?);
+    try std.Io.Dir.cwd().createDirPath(runtime_io.get(), self.http_cache_dir_default.?);
 }
 
 pub fn init(allocator: Allocator, exec_name: []const u8, mode: Mode) !Config {
@@ -502,6 +507,18 @@ test "browser HTTP scale defaults leave explicit overrides intact" {
     config.mode.serve.http_max_host_open = 3;
     try std.testing.expectEqual(@as(u8, 7), config.httpMaxConcurrent());
     try std.testing.expectEqual(@as(u8, 3), config.httpMaxHostOpen());
+}
+
+test "CDP worker recycle defaults are bounded and configurable" {
+    var config: Config = undefined;
+    config.mode = .{ .serve = .{} };
+    try std.testing.expectEqual(@as(u32, 1), config.workerMaxPages());
+    try std.testing.expectEqual(@as(u64, 2 * 1024 * 1024 * 1024), config.workerMaxRssBytes());
+
+    config.mode.serve.worker_max_pages = 12;
+    config.mode.serve.worker_max_rss = 0;
+    try std.testing.expectEqual(@as(u32, 12), config.workerMaxPages());
+    try std.testing.expectEqual(@as(u64, 0), config.workerMaxRssBytes());
 }
 
 pub fn httpMaxRedirects(_: *const Config) u8 {
@@ -652,7 +669,8 @@ pub fn browserProfilePool(self: *const Config) ?[]const u8 {
 fn resolveBrowserProfilePoolPick(self: *const Config, allocator: Allocator) !?[]const u8 {
     const pool = self.browserProfilePool() orelse return null;
     if (self.browserProfile() != null) return null;
-    return try ProfileRotation.pickFromPool(allocator, pool, std.crypto.random);
+    var random_source = std.Random.IoSource{ .io = runtime_io.get() };
+    return try ProfileRotation.pickFromPool(allocator, pool, random_source.interface());
 }
 
 pub fn httpCacheDir(self: *const Config) ?[]const u8 {
@@ -796,7 +814,7 @@ pub fn googleChromeTransport(self: *const Config) bool {
     };
     // Explicit flag or env override. Antidetect profiles also enable this from
     // Frame.navigate (google-search sg_ss= policy uses real Chrome network).
-    return flag or std.posix.getenv("KOKO_CHROME_SPAWN") != null;
+    return flag or runtime_io.getenv("KOKO_CHROME_SPAWN") != null;
 }
 
 pub fn maxConnections(self: *const Config) u16 {
@@ -811,6 +829,24 @@ pub fn maxPendingConnections(self: *const Config) u31 {
     return switch (self.mode) {
         .serve => |opts| opts.cdp_max_pending_connections,
         .mcp => 128,
+        else => unreachable,
+    };
+}
+
+pub fn workerMaxPages(self: *const Config) u32 {
+    return switch (self.mode) {
+        .serve => |opts| opts.worker_max_pages,
+        // MCP's optional CDP listener uses the same per-connection browser
+        // worker but does not expose serve-only tuning flags.
+        .mcp => 1,
+        else => unreachable,
+    };
+}
+
+pub fn workerMaxRssBytes(self: *const Config) u64 {
+    return switch (self.mode) {
+        .serve => |opts| opts.worker_max_rss,
+        .mcp => 2 * 1024 * 1024 * 1024,
         else => unreachable,
     };
 }
@@ -881,7 +917,7 @@ pub const HttpHeaders = struct {
             extra_headers.deinit(allocator);
         }
         if (config.extraHeadersFile()) |path| {
-            const bytes = std.fs.cwd().readFileAlloc(allocator, path, 256 * 1024) catch |err| {
+            const bytes = std.Io.Dir.cwd().readFileAlloc(runtime_io.get(), path, allocator, .limited(256 * 1024)) catch |err| {
                 log.warn(.app, "failed to read extra headers file", .{ .path = path, .err = err });
                 return error.InvalidArgument;
             };
@@ -1241,6 +1277,15 @@ pub fn printUsageAndExit(self: *const Config, success: bool) void {
         \\                Maximum pending connections in the accept queue.
         \\                Defaults to 128.
         \\
+        \\--worker-max-pages
+        \\                Recycle a CDP worker after this many browser contexts.
+        \\                0 disables the page-count policy. Defaults to 1.
+        \\
+        \\--worker-max-rss
+        \\                Recycle a CDP worker after RSS high-water growth
+        \\                since worker start/recycle reaches these bytes.
+        \\                0 disables the policy. Defaults to 2147483648.
+        \\
         \\--cookie        Path to a JSON file to load cookies from (CLI override; profile seed loads automatically).
         \\                Defaults to no cookie loading.
         \\
@@ -1270,7 +1315,7 @@ pub fn printUsageAndExit(self: *const Config, success: bool) void {
     ;
     std.debug.print(usage, .{self.exec_name});
     if (success) {
-        return std.process.cleanExit();
+        return std.process.cleanExit(runtime_io.get());
     }
     std.process.exit(1);
 }
@@ -1279,12 +1324,12 @@ pub fn printUsageAndExit(self: *const Config, success: bool) void {
 /// Long-lived config state (`http_headers`, `profile_runtime`) uses `config_allocator`
 /// so `deinit(config_allocator)` can free without allocator mismatch.
 /// Must write in place: Config embeds non-copyable arena state in profile/runtime.
-pub fn parseArgsInPlace(self: *Config, cli_allocator: Allocator, config_allocator: Allocator) !void {
+pub fn parseArgsInPlace(self: *Config, cli_allocator: Allocator, config_allocator: Allocator, process_args: std.process.Args) !void {
     // CommonOptions is intentionally shared by three commands. Raising this
     // quota keeps the generic CLI parser's compile-time field expansion below
     // Zig's default after controlled-execution options were added.
     @setEvalBranchQuota(4_000);
-    const exec_name, const command = try Commands.parse(cli_allocator);
+    const exec_name, const command = try Commands.parse(cli_allocator, process_args);
     if (command == .serve and command.serve.timeout != null) {
         log.warn(.app, "--timeout is deprecated", .{});
     }
@@ -1294,9 +1339,9 @@ pub fn parseArgsInPlace(self: *Config, cli_allocator: Allocator, config_allocato
     }
 }
 
-pub fn parseArgs(cli_allocator: Allocator, config_allocator: Allocator) !Config {
+pub fn parseArgs(cli_allocator: Allocator, config_allocator: Allocator, process_args: std.process.Args) !Config {
     var config: Config = undefined;
-    try parseArgsInPlace(&config, cli_allocator, config_allocator);
+    try parseArgsInPlace(&config, cli_allocator, config_allocator, process_args);
     return config;
 }
 

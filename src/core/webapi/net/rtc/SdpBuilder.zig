@@ -51,7 +51,9 @@ pub const CandidateLine = struct {
 
 pub fn build(out: *std.ArrayList(u8), params: SdpParams) ![]const u8 {
     const start = out.items.len;
-    const w = out.writer(std.heap.page_allocator);
+    var allocating: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+    defer allocating.deinit();
+    const w = &allocating.writer;
 
     try w.writeAll("v=0\r\n");
     try w.print("o=- {d} {d} IN IP4 127.0.0.1\r\n", .{ params.session_id, params.session_version });
@@ -97,6 +99,7 @@ pub fn build(out: *std.ArrayList(u8), params: SdpParams) ![]const u8 {
         try writeDataChannelSection(w, params, mid);
     }
 
+    try out.appendSlice(std.heap.page_allocator, allocating.written());
     return out.items[start..];
 }
 
@@ -212,8 +215,7 @@ fn writeCandidateLine(w: anytype, cand: CandidateLine) !void {
 }
 
 pub fn formatCandidateLine(buf: []u8, cand: CandidateLine) ![]const u8 {
-    var fbs = std.io.fixedBufferStream(buf);
-    const w = fbs.writer();
-    try writeCandidateLine(w, cand);
-    return fbs.getWritten();
+    var writer = std.Io.Writer.fixed(buf);
+    try writeCandidateLine(&writer, cand);
+    return writer.buffered();
 }

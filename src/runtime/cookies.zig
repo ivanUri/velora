@@ -13,6 +13,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const runtime_io = @import("../support/io.zig");
+const datetime = @import("../support/datetime.zig");
 
 const Session = @import("../core/browser/Session.zig");
 const Cookie = @import("../core/webapi/storage/Cookie.zig");
@@ -33,7 +35,7 @@ fn _loadFromFile(session: *Session, path: []const u8) !void {
     const arena = try session.getArena(.medium, "Cookies.loadFromFile");
     defer session.releaseArena(arena);
 
-    const content = std.fs.cwd().readFileAlloc(arena, path, 1024 * 1024) catch |err| {
+    const content = std.Io.Dir.cwd().readFileAlloc(runtime_io.get(), path, arena, .limited(1024 * 1024)) catch |err| {
         switch (err) {
             error.FileNotFound => log.debug(.app, "Cookie.readFile", .{ .path = path, .note = "file not found" }),
             else => log.err(.app, "Cookie.readFile", .{ .path = path, .err = err }),
@@ -49,7 +51,7 @@ fn _loadFromFile(session: *Session, path: []const u8) !void {
     };
 
     const jar = &session.cookie_jar;
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
 
     var loaded: usize = 0;
     for (json_cookies) |jc| {
@@ -117,10 +119,12 @@ pub fn saveToFile(jar: *Cookie.Jar, path: []const u8) void {
 fn _saveToFile(jar: *Cookie.Jar, path: []const u8) !void {
     jar.removeExpired(null);
 
+    const io = runtime_io.get();
     var buf: [8192]u8 = undefined;
-    var atomic_file = try std.fs.cwd().atomicFile(path, .{ .make_path = true, .write_buffer = &buf });
-    defer atomic_file.deinit();
-    const w = &atomic_file.file_writer.interface;
+    var atomic_file = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .make_path = true, .replace = true });
+    defer atomic_file.deinit(io);
+    var file_writer = atomic_file.file.writer(io, &buf);
+    const w = &file_writer.interface;
 
     try w.writeByte('[');
     for (jar.cookies.items, 0..) |c, i| {
@@ -149,9 +153,9 @@ fn _saveToFile(jar: *Cookie.Jar, path: []const u8) !void {
         try w.writeByte('\n');
     }
     try w.writeAll("]\n");
-    try atomic_file.flush();
-    try atomic_file.file_writer.file.sync();
-    try atomic_file.renameIntoPlace();
+    try w.flush();
+    try atomic_file.file.sync(io);
+    try atomic_file.replace(io);
 
     log.info(.app, "Cookie.saveToFile", .{ .path = path, .count = jar.cookies.items.len });
 }

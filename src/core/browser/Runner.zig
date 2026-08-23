@@ -12,6 +12,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const Timer = @import("../../support/timer.zig");
 const builtin = @import("builtin");
 
 const js = @import("../js/js.zig");
@@ -61,13 +62,73 @@ pub const ExpandLazyOpts = struct {
     /// Maximum number of viewport-sized scroll steps. This is a safety limit
     /// for pages that append content forever.
     max_scrolls: u32 = 80,
-    /// Time to service timers, scroll handlers, DOM mutations and requests
-    /// after each step.
+    /// Maximum time to service timers, scroll handlers, DOM mutations and
+    /// requests after each step. Adaptive idle can finish earlier.
     settle_ms: u32 = 250,
     /// Number of unchanged bottom passes required before declaring expansion
     /// complete.
     stable_rounds: u8 = 3,
+    /// Short quiet interval used between scroll steps. `settle_ms` remains the
+    /// maximum budget for a step, but a page that has no new work can advance
+    /// after this interval instead of always paying the full budget.
+    adaptive_quiet_ms: u32 = 125,
 };
+
+const LazyIdleState = struct {
+    frame_identity: usize = 0,
+    height: f64 = -1.0,
+    quiet_ms: u32 = 0,
+    initialized: bool = false,
+
+    fn observe(
+        self: *LazyIdleState,
+        frame_identity: usize,
+        height: f64,
+        slice_ms: u32,
+        required_quiet_ms: u32,
+    ) bool {
+        const changed = !self.initialized or
+            self.frame_identity != frame_identity or
+            self.height != height;
+
+        if (changed) {
+            self.quiet_ms = 0;
+        } else {
+            self.quiet_ms +|= slice_ms;
+        }
+
+        self.frame_identity = frame_identity;
+        self.height = height;
+        self.initialized = true;
+
+        return !changed and self.quiet_ms >= required_quiet_ms;
+    }
+};
+
+fn pumpLazyStep(self: *Runner, opts: ExpandLazyOpts) !u32 {
+    if (opts.settle_ms == 0) return 0;
+
+    const slice_ms: u32 = 50;
+    var elapsed_ms: u32 = 0;
+    var idle = LazyIdleState{};
+
+    while (elapsed_ms < opts.settle_ms) {
+        const tick_ms = @min(slice_ms, opts.settle_ms - elapsed_ms);
+        try self.pumpFor(tick_ms);
+        elapsed_ms += tick_ms;
+
+        const frame = self.session.currentFrame() orelse return elapsed_ms;
+        const root = frame.document.getDocumentElement() orelse return elapsed_ms;
+        const height = root.getScrollHeight(frame);
+        if (idle.observe(
+            @intFromPtr(frame),
+            height,
+            tick_ms,
+            opts.adaptive_quiet_ms,
+        )) return elapsed_ms;
+    }
+    return elapsed_ms;
+}
 
 /// A low-frequency hook for consumers that need an intermediate document
 /// snapshot while a wait policy is still running. This deliberately lives on
@@ -111,7 +172,7 @@ pub fn waitCDP(self: *Runner, opts: WaitOpts) !CDPWaitResult {
 /// in one-shot CLI executions.
 pub fn pumpFor(self: *Runner, ms: u32) !void {
     if (ms == 0) return;
-    var timer = try std.time.Timer.start();
+    var timer = try Timer.start();
     while (true) {
         if (self.session.browser.isHostTerminationRequested()) return;
         const elapsed: u32 = @intCast(timer.read() / std.time.ns_per_ms);
@@ -130,7 +191,7 @@ pub fn pumpFor(self: *Runner, ms: u32) !void {
             .ok => |next_ms| @min(remaining, next_ms),
             .cdp_socket => @min(remaining, 5),
         };
-        if (sleep_ms > 0) std.Thread.sleep(std.time.ns_per_ms * sleep_ms);
+        if (sleep_ms > 0) Timer.sleepNanoseconds(std.time.ns_per_ms * sleep_ms);
     }
 }
 
@@ -155,14 +216,18 @@ pub fn expandLazy(self: *Runner, opts: ExpandLazyOpts) !void {
         const scroll_height = root.getScrollHeight(frame);
         const max_y = @max(0.0, scroll_height - viewport_height);
         const current_y = @as(f64, @floatFromInt(frame.window.getScrollY()));
-        const step = @max(viewport_height * 0.8, 1.0);
+        // Advance one full viewport per pass. Consecutive viewport edges are
+        // contiguous, so IntersectionObserver targets are still visited while
+        // avoiding the redundant 20% overlap that inflated scroll count.
+        const step = @max(viewport_height, 1.0);
         const next_y = @min(max_y, current_y + step);
 
         frame.window.scrollTo(.{ .x = @intCast(frame.window.getScrollX()) }, @intFromFloat(next_y), frame) catch |err| {
             log.warn(.browser, "expand lazy scroll failed", .{ .err = err, .step = step_index });
             return err;
         };
-        try self.pumpFor(opts.settle_ms);
+        const pump_ms = try self.pumpLazyStep(opts);
+        log.debug(.browser, "expand lazy step settled", .{ .step = step_index, .pump_ms = pump_ms });
 
         const after_frame = self.session.currentFrame() orelse return;
         const after_root = after_frame.document.getDocumentElement() orelse return;
@@ -186,7 +251,7 @@ pub fn expandLazy(self: *Runner, opts: ExpandLazyOpts) !void {
 }
 
 fn _wait(self: *Runner, comptime is_cdp: bool, opts: WaitOpts) !CDPWaitResult {
-    var timer = try std.time.Timer.start();
+    var timer = try Timer.start();
     var done_confirmations: u8 = 0;
     if (opts.until == .domstable) self.dom_stability.reset();
 
@@ -202,7 +267,7 @@ fn _wait(self: *Runner, comptime is_cdp: bool, opts: WaitOpts) !CDPWaitResult {
     // speeds up incremental GC without stalling the tick.
     // Every 1s put too much pressure on V8 (high CPU on complex pages); 5s is enough.
     const gc_hint_period_ns: u64 = std.time.ns_per_s * 5;
-    var gc_hint_timer = std.time.Timer.start() catch unreachable;
+    var gc_hint_timer = Timer.start() catch unreachable;
 
     while (true) {
         // A host deadline is an operation-level cancellation, not merely a V8
@@ -268,7 +333,7 @@ fn _wait(self: *Runner, comptime is_cdp: bool, opts: WaitOpts) !CDPWaitResult {
             return .done;
         }
         if (next_ms > 0) {
-            std.Thread.sleep(std.time.ns_per_ms * next_ms);
+            Timer.sleepNanoseconds(std.time.ns_per_ms * next_ms);
         }
     }
 }
@@ -629,7 +694,7 @@ pub fn waitForSelector(self: *Runner, selector: [:0]const u8, timeout_ms: u32) !
     const arena = try self.session.getArena(.small, "Runner.waitForSelector");
     defer self.session.releaseArena(arena);
 
-    var timer = try std.time.Timer.start();
+    var timer = try Timer.start();
     const parsed_selector = try Selector.parseLeaky(arena, selector);
 
     while (true) {
@@ -650,11 +715,11 @@ pub fn waitForSelector(self: *Runner, selector: [:0]const u8, timeout_ms: u32) !
                 // Still pump host tasks; only fail on wall clock.
                 const js_mod = @import("../js/js.zig");
                 js_mod.EventLoop.spin(&self.frame.js.execution, .{ .max_tasks = 16, .stop_when_idle = true });
-                std.Thread.sleep(std.time.ns_per_ms * 5);
+                Timer.sleepNanoseconds(std.time.ns_per_ms * 5);
             },
             .ok => |recommended_sleep_ms| {
                 if (recommended_sleep_ms > 0) {
-                    std.Thread.sleep(std.time.ns_per_ms * recommended_sleep_ms);
+                    Timer.sleepNanoseconds(std.time.ns_per_ms * recommended_sleep_ms);
                 }
             },
         }
@@ -679,7 +744,7 @@ fn evaluateWaitScript(frame: *Frame, script: [:0]const u8) !bool {
 }
 
 pub fn waitForScript(runner: *Runner, script: [:0]const u8, timeout_ms: u32) !void {
-    var timer = try std.time.Timer.start();
+    var timer = try Timer.start();
 
     while (true) {
         // Evaluation owns a short-lived V8 handle scope. It must be closed
@@ -704,11 +769,11 @@ pub fn waitForScript(runner: *Runner, script: [:0]const u8, timeout_ms: u32) !vo
                 if (runner.session.currentFrame()) |active_frame| {
                     js_mod.EventLoop.spin(&active_frame.js.execution, .{ .max_tasks = 16, .stop_when_idle = true });
                 }
-                std.Thread.sleep(std.time.ns_per_ms * 5);
+                Timer.sleepNanoseconds(std.time.ns_per_ms * 5);
             },
             .ok => |recommended_sleep_ms| {
                 if (recommended_sleep_ms > 0) {
-                    std.Thread.sleep(std.time.ns_per_ms * recommended_sleep_ms);
+                    Timer.sleepNanoseconds(std.time.ns_per_ms * recommended_sleep_ms);
                 }
             },
         }
@@ -791,7 +856,7 @@ test "Runner: text navigation completes after the response body" {
 
     try frame.navigate("http://127.0.0.1:9582/xhr/json", .{});
     var runner = try frame._session.runner(.{});
-    var timer = try std.time.Timer.start();
+    var timer = try Timer.start();
     try runner.wait(.{ .ms = 2_000, .until = .domstable });
 
     // JSON is represented as a synthetic preview document, but it must not
@@ -806,7 +871,7 @@ test "Runner: domstable resets for delayed DOM mutation and ignores recurring ba
     defer frame._session.removePage();
 
     var runner = try frame._session.runner(.{});
-    var timer = try std.time.Timer.start();
+    var timer = try Timer.start();
     try runner.wait(.{ .ms = 2000, .until = .domstable });
     const elapsed_ms = timer.read() / std.time.ns_per_ms;
 
@@ -816,4 +881,19 @@ test "Runner: domstable resets for delayed DOM mutation and ignores recurring ba
     try testing.expect(elapsed_ms < 1500);
     const content = try frame.document.querySelector(comptime .wrap("#content"), frame) orelse return error.MissingStableContent;
     try testing.expectEqualStrings("settled", try content.asNode().getTextContentAlloc(testing.arena_allocator));
+}
+
+test "Runner: adaptive lazy idle resets on document extent changes" {
+    var idle = LazyIdleState{};
+
+    // The first observation establishes the generation and cannot be idle.
+    try std.testing.expect(!idle.observe(1, 100, 50, 100));
+    try std.testing.expect(!idle.observe(1, 100, 50, 100));
+    try std.testing.expect(idle.observe(1, 100, 50, 100));
+
+    // A lazy response that changes document extent resets the quiet interval
+    // instead of allowing an early advance.
+    try std.testing.expect(!idle.observe(1, 120, 50, 100));
+    try std.testing.expect(!idle.observe(1, 120, 50, 100));
+    try std.testing.expect(idle.observe(1, 120, 50, 100));
 }

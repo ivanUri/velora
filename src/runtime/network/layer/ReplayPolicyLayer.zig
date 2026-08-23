@@ -7,6 +7,7 @@
 //! failed execution and run the checkpoint again after removing it.
 
 const std = @import("std");
+const runtime_io = @import("../../../support/io.zig");
 
 const http = @import("../http.zig");
 const Client = @import("../../../core/browser/HttpClient.zig").Client;
@@ -45,7 +46,7 @@ pub fn init(allocator: std.mem.Allocator, policy_path: ?[]const u8) !Self {
     var self: Self = .{ .arena = std.heap.ArenaAllocator.init(allocator) };
     errdefer self.arena.deinit();
     const path = policy_path orelse return self;
-    const raw = try std.fs.cwd().readFileAlloc(self.arena.allocator(), path, 16 * 1024 * 1024);
+    const raw = try std.Io.Dir.cwd().readFileAlloc(runtime_io.get(), path, self.arena.allocator(), .limited(16 * 1024 * 1024));
     const document = try std.json.parseFromSliceLeaky(Document, self.arena.allocator(), raw, .{
         .ignore_unknown_fields = false,
     });

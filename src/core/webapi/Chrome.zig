@@ -4,6 +4,7 @@
 // Missing runtime is safer than a lying runtime (see stealth hasBadChromeRuntime).
 
 const std = @import("std");
+const datetime = @import("../../support/datetime.zig");
 const js = @import("../js/js.zig");
 const Frame = @import("../browser/Frame.zig");
 
@@ -78,7 +79,7 @@ pub fn recordDocumentComplete(self: *Chrome, load_end_ms: f64) void {
 }
 
 pub fn loadTimes(self: *const Chrome) LoadTimes {
-    const now = @as(f64, @floatFromInt(std.time.timestamp()));
+    const now = @as(f64, @floatFromInt(datetime.timestamp(.clock)));
     const request = if (self._request_time > 0) self._request_time else now - 0.4;
     const finish = if (self._finish_load_time > 0) self._finish_load_time else now;
     const commit = if (self._commit_time > 0) self._commit_time else request + 0.12;
@@ -120,7 +121,7 @@ pub fn csiPageT(
 pub fn csi(self: *const Chrome, frame: *Frame) Csi {
     const perf = &frame.window._performance;
     const timing = perf._timing;
-    const now_ms: u64 = @intCast(@max(std.time.milliTimestamp(), 0));
+    const now_ms = datetime.milliTimestamp(.clock);
 
     const start_e: u64 = if (timing.navigation_start > 0)
         @intFromFloat(timing.navigation_start)

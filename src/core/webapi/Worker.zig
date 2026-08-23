@@ -70,8 +70,8 @@ _parent_delivery_ready: bool = false,
 _script_buffer: std.ArrayList(u8) = .empty,
 _http_response: ?HttpClient.Response = null,
 _debug_next_message_id: u64 = 1,
-_pending_inbound_messages: std.ArrayListUnmanaged(PendingInboundMessage) = .{},
-_pending_undelivered: std.ArrayListUnmanaged(PendingInboundMessage) = .{},
+_pending_inbound_messages: std.ArrayListUnmanaged(PendingInboundMessage) = .empty,
+_pending_undelivered: std.ArrayListUnmanaged(PendingInboundMessage) = .empty,
 
 // Event handlers
 _on_error: ?js.Function.Global = null,
@@ -1493,12 +1493,12 @@ fn releasePendingInboundMessages(self: *Worker) void {
         pending.data.release();
     }
     self._pending_inbound_messages.deinit(self._arena);
-    self._pending_inbound_messages = .{};
+    self._pending_inbound_messages = .empty;
     for (self._pending_undelivered.items) |pending| {
         pending.data.release();
     }
     self._pending_undelivered.deinit(self._arena);
-    self._pending_undelivered = .{};
+    self._pending_undelivered = .empty;
 }
 
 const PendingInboundMessage = struct {

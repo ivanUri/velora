@@ -38,7 +38,7 @@ pub fn build(b: *Build) !void {
     const prebuilt_v8_path = b.option([]const u8, "prebuilt_v8_path", "Path to prebuilt libc_v8.a");
     const snapshot_path = b.option([]const u8, "snapshot_path", "Path to v8 snapshot");
     const version = resolveVersion(b);
-    var stdout = std.fs.File.stdout().writer(&.{});
+    var stdout = std.Io.File.stdout().writerStreaming(b.graph.io, &.{});
     try stdout.interface.print("Koko {f}\n", .{version});
 
     const version_string = b.fmt("{f}", .{version});
@@ -127,8 +127,6 @@ pub fn build(b: *Build) !void {
         // browser
         const exe = b.addExecutable(.{
             .name = "koko",
-            // Zig 0.15.2: LLVM+Debug SIGSEGV in lowerDebugType; native+Debug SIGSEGV in updateLazySymbol.
-            // Strip debug info in Debug builds to avoid LLVM debug-type recursion.
             .use_llvm = true,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/adapters/cli/main.zig"),
@@ -364,7 +362,7 @@ const curl_impersonate_linux_include = "vendor/curl-impersonate/linux/include";
 
 fn fileExists(b: *Build, rel: []const u8) bool {
     const path = b.pathFromRoot(rel);
-    b.build_root.handle.access(path, .{}) catch return false;
+    b.build_root.handle.access(b.graph.io, path, .{}) catch return false;
     return true;
 }
 
@@ -505,7 +503,7 @@ fn buildZlib(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.Opti
 
     const lib = b.addLibrary(.{ .name = "z", .root_module = mod });
     lib.installHeadersDirectory(dep.path(""), "", .{});
-    lib.addCSourceFiles(.{
+    lib.root_module.addCSourceFiles(.{
         .root = dep.path(""),
         .flags = &.{
             "-DHAVE_SYS_TYPES_H",
@@ -541,21 +539,21 @@ fn buildBrotli(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.Op
     const brotlienc = b.addLibrary(.{ .name = "brotlienc", .root_module = mod });
 
     brotlicmn.installHeadersDirectory(dep.path("c/include/brotli"), "brotli", .{});
-    brotlicmn.addCSourceFiles(.{
+    brotlicmn.root_module.addCSourceFiles(.{
         .root = dep.path("c/common"),
         .files = &.{
             "transform.c",  "shared_dictionary.c", "platform.c",
             "dictionary.c", "context.c",           "constants.c",
         },
     });
-    brotlidec.addCSourceFiles(.{
+    brotlidec.root_module.addCSourceFiles(.{
         .root = dep.path("c/dec"),
         .files = &.{
             "bit_reader.c", "decode.c", "huffman.c",
             "prefix.c",     "state.c",  "static_init.c",
         },
     });
-    brotlienc.addCSourceFiles(.{
+    brotlienc.root_module.addCSourceFiles(.{
         .root = dep.path("c/enc"),
         .files = &.{
             "backward_references.c",        "backward_references_hq.c", "bit_cost.c",
@@ -612,7 +610,7 @@ fn buildNghttp2(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.O
 
     lib.installConfigHeader(config);
     lib.installHeadersDirectory(dep.path("lib/includes/nghttp2"), "nghttp2", .{});
-    lib.addCSourceFiles(.{
+    lib.root_module.addCSourceFiles(.{
         .root = dep.path("lib"),
         .flags = &.{
             "-DNGHTTP2_STATICLIB",
@@ -698,13 +696,13 @@ fn buildLibidn2(
         // alongside the existing strverscmp shim. macOS libc lacked the
         // symbol entirely before 15.4 — provide it here so the link
         // succeeds. Mirrors how gl/strverscmp.c is wired up below.
-        lib.addCSourceFile(.{
+        lib.root_module.addCSourceFile(.{
             .file = b.path("vendor/libidn2/darwin/strchrnul.c"),
             .flags = &.{},
         });
     }
 
-    lib.addCSourceFiles(.{
+    lib.root_module.addCSourceFiles(.{
         .root = dep.path("lib"),
         .flags = &.{ "-DHAVE_CONFIG_H", "-DIDN2_STATIC" },
         .files = &.{
@@ -714,14 +712,14 @@ fn buildLibidn2(
             "version.c",
         },
     });
-    lib.addCSourceFiles(.{
+    lib.root_module.addCSourceFiles(.{
         .root = dep.path("gl"),
         .flags = &.{"-DHAVE_CONFIG_H"},
         // malloca.c provides striconveha's stack-or-heap allocator; strverscmp
         // is a glibc extension absent on macOS that lib/version.c needs.
         .files = &.{ "malloca.c", "strverscmp.c" },
     });
-    lib.addCSourceFiles(.{
+    lib.root_module.addCSourceFiles(.{
         .root = dep.path("unistring"),
         .flags = &.{"-DHAVE_CONFIG_H"},
         .files = &.{
@@ -757,11 +755,12 @@ fn renderUnistringHeader(b: *Build, dep: *Build.Dependency, name: []const u8) *B
     const lazy = dep.path(in_rel);
     const path = lazy.getPath3(b, null);
 
-    const file = path.root_dir.handle.openFile(path.sub_path, .{}) catch |e| {
+    const file = path.root_dir.handle.openFile(b.graph.io, path.sub_path, .{}) catch |e| {
         std.debug.panic("openFile {s}: {s}", .{ path.sub_path, @errorName(e) });
     };
-    defer file.close();
-    const contents = file.readToEndAlloc(b.allocator, 4 << 20) catch @panic("OOM");
+    defer file.close(b.graph.io);
+    var file_reader = file.readerStreaming(b.graph.io, &.{});
+    const contents = file_reader.interface.allocRemaining(b.allocator, .limited(4 << 20)) catch @panic("OOM");
 
     const ch = b.addConfigHeader(.{
         .include_path = out_name,
@@ -1063,9 +1062,9 @@ fn buildCurl(
     curl_config.addValues(config);
 
     const lib = b.addLibrary(.{ .name = "curl", .root_module = mod });
-    lib.addConfigHeader(curl_config);
+    lib.root_module.addConfigHeader(curl_config);
     lib.installHeadersDirectory(dep.path("include/curl"), "curl", .{});
-    lib.addCSourceFiles(.{
+    lib.root_module.addCSourceFiles(.{
         .root = dep.path("lib"),
         .flags = &.{
             "-D_GNU_SOURCE",
@@ -1204,7 +1203,7 @@ fn linkWebRtc(b: *Build, mod: *Build.Module, is_tsan: bool) !void {
     const usrsctp = b.addLibrary(.{ .name = "usrsctp", .root_module = usrsctp_mod });
     usrsctp.installHeadersDirectory(usrsctp_dep.path("usrsctplib"), "usrsctp", .{});
 
-    usrsctp.addCSourceFiles(.{
+    usrsctp.root_module.addCSourceFiles(.{
         .root = usrsctp_dep.path("usrsctplib"),
         .flags = &.{
             "-D__Userspace__",
@@ -1268,5 +1267,5 @@ fn runGit(b: *std.Build, args: []const []const u8) ![]const u8 {
     defer command.deinit(b.allocator);
     try command.appendSlice(b.allocator, &.{ "git", "-C", dir });
     try command.appendSlice(b.allocator, args);
-    return b.runAllowFail(command.items, &code, .Ignore);
+    return b.runAllowFail(command.items, &code, .ignore);
 }

@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+pub const ArgIterator = std.process.Args.Iterator;
 const assert = @import("assert.zig").assert;
 const log = @import("log.zig");
 
@@ -130,19 +131,15 @@ pub fn Builder(comptime commands: anytype) type {
 
         /// Enum type for provided commands.
         pub const Enum = blk: {
-            var enum_fields: [commands.len]std.builtin.Type.EnumField = undefined;
+            const TagInt = std.math.IntFittingRange(0, commands.len);
+            var field_names: [commands.len][]const u8 = undefined;
+            var field_values: [commands.len]TagInt = undefined;
             for (commands, 0..) |command, i| {
-                enum_fields[i] = .{ .name = command.name, .value = i };
+                field_names[i] = command.name;
+                field_values[i] = @intCast(i);
             }
 
-            break :blk @Type(.{
-                .@"enum" = .{
-                    .decls = &.{},
-                    .fields = &enum_fields,
-                    .is_exhaustive = true,
-                    .tag_type = std.math.IntFittingRange(0, commands.len),
-                },
-            });
+            break :blk @Enum(TagInt, .exhaustive, &field_names, &field_values);
         };
 
         /// Creates an array of `StructField` out of given options.
@@ -164,7 +161,7 @@ pub fn Builder(comptime commands: anytype) type {
                             @compileError("`default` is not allowed for lists");
                         }
                         // Multiples are always initialized the same.
-                        break :blk @as(*const anyopaque, @ptrCast(&@as(T, .{})));
+                        break :blk @as(*const anyopaque, @ptrCast(&@as(T, .empty)));
                     }
 
                     switch (@typeInfo(option.type)) {
@@ -231,35 +228,41 @@ pub fn Builder(comptime commands: anytype) type {
                     else
                         .{});
 
-                const T = @Type(.{
-                    .@"struct" = .{
-                        .decls = &.{},
-                        .fields = &fields,
-                        .is_tuple = false,
-                        .layout = .auto,
-                    },
-                });
+                var field_names: [fields.len][]const u8 = undefined;
+                var field_types: [fields.len]type = undefined;
+                var field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
+                for (fields, 0..) |field, j| {
+                    field_names[j] = field.name;
+                    field_types[j] = field.type;
+                    field_attrs[j] = .{
+                        .@"comptime" = field.is_comptime,
+                        .@"align" = field.alignment,
+                        .default_value_ptr = field.default_value_ptr,
+                    };
+                }
+                const T = @Struct(.auto, null, &field_names, &field_types, &field_attrs);
 
                 union_fields[i] = .{ .name = command.name, .type = T, .alignment = @alignOf(T) };
             }
 
-            break :blk @Type(.{
-                .@"union" = .{
-                    .decls = &.{},
-                    .fields = &union_fields,
-                    .layout = .auto,
-                    .tag_type = Enum,
-                },
-            });
+            var field_names: [union_fields.len][]const u8 = undefined;
+            var field_types: [union_fields.len]type = undefined;
+            var field_attrs: [union_fields.len]std.builtin.Type.UnionField.Attributes = undefined;
+            for (union_fields, 0..) |field, i| {
+                field_names[i] = field.name;
+                field_types[i] = field.type;
+                field_attrs[i] = .{ .@"align" = field.alignment };
+            }
+            break :blk @Union(.auto, Enum, &field_names, &field_types, &field_attrs);
         };
 
         /// Parses executable name, command and options via single call.
-        pub fn parse(allocator: Allocator) !struct { []const u8, Union } {
+        pub fn parse(allocator: Allocator, process_args: std.process.Args) !struct { []const u8, Union } {
             // The option structs are generated at comptime. Larger commands
             // (such as fetch with controlled-execution wiring) can exceed
             // Zig's small default while specializing pointer argument paths.
             @setEvalBranchQuota(10_000);
-            var args = try std.process.argsWithAllocator(allocator);
+            var args = try ArgIterator.initAllocator(process_args, allocator);
             defer args.deinit();
 
             const exec_name = std.fs.path.basename(args.next().?);
@@ -285,7 +288,7 @@ pub fn Builder(comptime commands: anytype) type {
             // we can create a new one. Not great, but this fallback is temporary
             // as we transition to this command mode approach.
             args.deinit();
-            args = try std.process.argsWithAllocator(allocator);
+            args = try ArgIterator.initAllocator(process_args, allocator);
             // Skip the `exec_name`.
             _ = args.skip();
 
@@ -342,10 +345,10 @@ pub fn Builder(comptime commands: anytype) type {
         /// Returns the type for validator function.
         pub fn ValidatorFn(comptime T: type, comptime is_multiple: bool) type {
             if (is_multiple) {
-                return *const fn (Allocator, *std.process.ArgIterator, *std.ArrayList(T)) anyerror!void;
+                return *const fn (Allocator, *ArgIterator, *std.ArrayList(T)) anyerror!void;
             }
 
-            return *const fn (Allocator, *std.process.ArgIterator) anyerror!T;
+            return *const fn (Allocator, *ArgIterator) anyerror!T;
         }
 
         /// Turns a snake_case string to kebab-case in comptime.
@@ -359,7 +362,7 @@ pub fn Builder(comptime commands: anytype) type {
 
         fn parseValue(
             allocator: Allocator,
-            args: *std.process.ArgIterator,
+            args: *ArgIterator,
             /// Pointer to field; *T.
             target: anytype,
             /// `Option` doesn't have a concrete type; this field expects:
@@ -435,14 +438,14 @@ pub fn Builder(comptime commands: anytype) type {
 
                         // DupeZ branch.
                         if (comptime pointer.sentinel()) |sentinel| {
-                            const buf = try allocator.alignedAlloc(u8, .fromByteUnits(pointer.alignment), str.len + 1);
+                            const buf = try allocator.alignedAlloc(u8, .fromByteUnits(pointer.alignment orelse @alignOf(pointer.child)), str.len + 1);
                             @memcpy(buf[0..str.len], str);
                             buf[str.len] = sentinel;
                             break :blk buf[0..str.len :sentinel];
                         }
 
                         // Dupe branch.
-                        const buf = try allocator.alignedAlloc(u8, .fromByteUnits(pointer.alignment), str.len);
+                        const buf = try allocator.alignedAlloc(u8, .fromByteUnits(pointer.alignment orelse @alignOf(pointer.child)), str.len);
                         @memcpy(buf, str);
                         break :blk buf;
                     };
@@ -535,7 +538,7 @@ pub fn Builder(comptime commands: anytype) type {
         fn parseCommand(
             allocator: Allocator,
             command: anytype,
-            args: *std.process.ArgIterator,
+            args: *ArgIterator,
         ) !Union {
             const Command = @FieldType(Union, command.name);
             var c = Command{};
@@ -618,14 +621,16 @@ pub fn Builder(comptime commands: anytype) type {
                             const v = blk: {
                                 // DupeZ branch.
                                 if (comptime pointer.sentinel()) |sentinel| {
-                                    const buf = try allocator.alignedAlloc(u8, .fromByteUnits(pointer.alignment), str.len + 1);
+                                    const alignment = pointer.alignment orelse @alignOf(pointer.child);
+                                    const buf = try allocator.alignedAlloc(u8, .fromByteUnits(alignment), str.len + 1);
                                     @memcpy(buf[0..str.len], str);
                                     buf[str.len] = sentinel;
                                     break :blk buf[0..str.len :sentinel];
                                 }
 
                                 // Dupe branch.
-                                const buf = try allocator.alignedAlloc(u8, .fromByteUnits(pointer.alignment), str.len);
+                                const alignment = pointer.alignment orelse @alignOf(pointer.child);
+                                const buf = try allocator.alignedAlloc(u8, .fromByteUnits(alignment), str.len);
                                 @memcpy(buf, str);
                                 break :blk buf;
                             };

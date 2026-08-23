@@ -107,7 +107,7 @@ fn initWithTrusted(arena: Allocator, typ: String, _opts: ?Options, trusted: bool
             ._shift_key = opts.shiftKey,
             ._alt_key = opts.altKey,
             ._meta_key = opts.metaKey,
-            ._button = std.meta.intToEnum(MouseButton, opts.button) catch return error.TypeError,
+            ._button = std.enums.fromInt(MouseButton, opts.button) orelse return error.TypeError,
             ._buttons = opts.buttons,
             ._related_target = opts.relatedTarget,
         },
@@ -244,7 +244,7 @@ pub fn initMouseEvent(
     self._alt_key = alt_key orelse false;
     self._shift_key = shift_key orelse false;
     self._meta_key = meta_key orelse false;
-    self._button = std.meta.intToEnum(MouseButton, button orelse 0) catch return error.TypeError;
+    self._button = std.enums.fromInt(MouseButton, button orelse 0) orelse return error.TypeError;
     self._related_target = related_target;
 }
 

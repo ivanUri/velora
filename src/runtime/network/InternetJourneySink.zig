@@ -3,8 +3,11 @@
 //! JSONL snapshots after CURLMSG_DONE and before the pooled handle is reset.
 
 const std = @import("std");
+const sync = @import("../../support/sync.zig");
 const builtin = @import("builtin");
 const http = @import("http.zig");
+const datetime = @import("../../support/datetime.zig");
+const runtime_io = @import("../../support/io.zig");
 
 const Self = @This();
 
@@ -46,13 +49,13 @@ const replay_stages = [_]JourneyStage{
 // A browser process may own multiple Network instances. They can share the
 // same observability file, so serialization must live at module/process scope
 // rather than on an individual sink.
-var process_mutex: std.Thread.Mutex = .{};
+var process_mutex: sync.Mutex = .{};
 var process_sequence: u64 = 0;
 var previous_cpu_sample: ?ProcessSample = null;
 var latest_cpu_sample: ?CpuSample = null;
 
 allocator: std.mem.Allocator,
-file: std.fs.File,
+file: std.Io.File,
 session_id: []u8,
 capture_bodies: bool,
 checkpoint_enabled: bool,
@@ -61,13 +64,14 @@ replay_enabled: bool,
 pub fn init(allocator: std.mem.Allocator, path: ?[]const u8, capture_bodies: bool, checkpoint_enabled: bool, replay_enabled: bool) !?Self {
     const output_path = path orelse return null;
 
-    const file = std.fs.cwd().openFile(output_path, .{ .mode = .write_only }) catch |err| switch (err) {
-        error.FileNotFound => try std.fs.cwd().createFile(output_path, .{}),
+    const io = runtime_io.get();
+    const file = std.Io.Dir.cwd().openFile(io, output_path, .{ .mode = .write_only }) catch |err| switch (err) {
+        error.FileNotFound => try std.Io.Dir.cwd().createFile(io, output_path, .{ .truncate = false }),
         else => return err,
     };
-    errdefer file.close();
-    try file.seekFromEnd(0);
-    const session_id = try std.fmt.allocPrint(allocator, "koko-{d}-{d}", .{ std.c.getpid(), std.time.nanoTimestamp() });
+    errdefer file.close(io);
+    if (std.c.lseek(file.handle, 0, std.c.SEEK.END) < 0) return error.Unexpected;
+    const session_id = try std.fmt.allocPrint(allocator, "koko-{d}-{d}", .{ std.c.getpid(), datetime.nanoTimestamp(.monotonic) });
     errdefer allocator.free(session_id);
     return .{
         .allocator = allocator,
@@ -81,7 +85,13 @@ pub fn init(allocator: std.mem.Allocator, path: ?[]const u8, capture_bodies: boo
 
 pub fn deinit(self: *Self) void {
     self.allocator.free(self.session_id);
-    self.file.close();
+    self.file.close(runtime_io.get());
+}
+
+fn append(self: *Self, bytes: []const u8) !void {
+    const io = runtime_io.get();
+    if (std.c.lseek(self.file.handle, 0, std.c.SEEK.END) < 0) return error.Unexpected;
+    try self.file.writeStreamingAll(io, bytes);
 }
 
 pub fn emit(
@@ -103,7 +113,7 @@ pub fn emit(
     else
         "";
     const response_code = conn.getResponseCode() catch 0;
-    const now = std.time.milliTimestamp();
+    const now = datetime.milliTimestamp(.clock);
     const content_encoding = headerValue(conn, "content-encoding");
     const cache_control = headerValue(conn, "cache-control");
     const server = headerValue(conn, "server");
@@ -226,8 +236,7 @@ pub fn emit(
     try writer.writeAll("]\n");
     // Other Network-owned sinks may have advanced the shared file since this
     // handle was opened. Re-resolve EOF while holding the process lock.
-    try self.file.seekFromEnd(0);
-    try self.file.writeAll(output.written());
+    try self.append(output.written());
 }
 
 /// Record a response fulfilled locally by the deterministic replay policy.
@@ -260,7 +269,7 @@ pub fn emitReplay(
     const response_value = response_body orelse "";
     const response_capture = if (self.capture_bodies) captureBody(response_value, null, content_type) else "";
     const request_capture = if (self.capture_bodies) captureBody(request_body orelse "", null, null) else "";
-    const now = std.time.milliTimestamp();
+    const now = datetime.milliTimestamp(.clock);
 
     var output: std.Io.Writer.Allocating = .init(self.allocator);
     defer output.deinit();
@@ -315,8 +324,7 @@ pub fn emitReplay(
         }, .{ .emit_null_optional_fields = false }, writer);
     }
     try writer.writeAll("]\n");
-    try self.file.seekFromEnd(0);
-    try self.file.writeAll(output.written());
+    try self.append(output.written());
 }
 
 fn headerFromList(headers: []const http.Header, name: []const u8) ?[]const u8 {
@@ -381,7 +389,7 @@ pub fn emitBrowserStage(
         .id = event_id,
         .sessionId = self.session_id,
         .sequence = process_sequence,
-        .timestamp = std.time.milliTimestamp(),
+        .timestamp = datetime.milliTimestamp(.clock),
         .duration = @as(f64, @floatFromInt(duration_us)) / 1000.0,
         .kind = "render",
         .name = stage,
@@ -412,8 +420,7 @@ pub fn emitBrowserStage(
         },
     }}, .{}, &output.writer);
     try output.writer.writeByte('\n');
-    try self.file.seekFromEnd(0);
-    try self.file.writeAll(output.written());
+    try self.append(output.written());
 }
 
 /// Emit a browser lifecycle milestone without claiming that the execution has
@@ -438,7 +445,7 @@ pub fn emitLifecycle(
         .id = event_id,
         .sessionId = self.session_id,
         .sequence = process_sequence,
-        .timestamp = std.time.milliTimestamp(),
+        .timestamp = datetime.milliTimestamp(.clock),
         .duration = @as(f64, 0),
         .kind = "navigation",
         .name = stage,
@@ -453,8 +460,7 @@ pub fn emitLifecycle(
         },
     }}, .{}, &output.writer);
     try output.writer.writeByte('\n');
-    try self.file.seekFromEnd(0);
-    try self.file.writeAll(output.written());
+    try self.append(output.written());
 }
 
 pub fn emitBrowserScript(self: *Self, duration_us: u64, frame_id: u32, loader_id: u32, url: []const u8, script_kind: []const u8) !void {
@@ -470,7 +476,7 @@ pub fn emitBrowserScript(self: *Self, duration_us: u64, frame_id: u32, loader_id
         .id = event_id,
         .sessionId = self.session_id,
         .sequence = process_sequence,
-        .timestamp = std.time.milliTimestamp(),
+        .timestamp = datetime.milliTimestamp(.clock),
         .duration = @as(f64, @floatFromInt(duration_us)) / 1000.0,
         .kind = "render",
         .name = "javascript",
@@ -478,8 +484,7 @@ pub fn emitBrowserScript(self: *Self, duration_us: u64, frame_id: u32, loader_id
         .payload = .{ .browserStage = "javascript", .systemStage = "thread-scheduler", .scriptUrl = url, .scriptKind = script_kind, .functionName = "<script>", .callId = event_id, .callKind = "script", .callDepth = @as(u8, 0), .frameId = frame_id, .loaderId = loader_id, .measurementState = "measured", .process = "Renderer", .thread = "Main", .processName = "Renderer", .threadName = "Main", .processId = std.c.getpid(), .threadId = std.Thread.getCurrentId(), .logicalCpuCount = sample.logical_cpu_count, .physicalMemoryBytes = sample.physical_memory_bytes, .residentMemoryBytes = sample.resident_memory_bytes, .cpuPercent = sample.cpu_percent, .cpuCoresUsed = sample.cpu_cores_used, .cpuSampleWindowMs = sample.cpu_sample_window_ms, .cpuSampleState = sample.cpu_sample_state, .contextSwitches = sample.context_switches, .diskReadBytes = sample.disk_read_bytes, .diskWriteBytes = sample.disk_write_bytes, .systemSampleState = sample.state },
     }}, .{}, &output.writer);
     try output.writer.writeByte('\n');
-    try self.file.seekFromEnd(0);
-    try self.file.writeAll(output.written());
+    try self.append(output.written());
 }
 
 pub fn emitJavaScriptError(
@@ -504,7 +509,7 @@ pub fn emitJavaScriptError(
         .id = event_id,
         .sessionId = self.session_id,
         .sequence = process_sequence,
-        .timestamp = std.time.milliTimestamp(),
+        .timestamp = datetime.milliTimestamp(.clock),
         .duration = @as(f64, 0),
         .kind = "javascript",
         .name = error_kind,
@@ -523,8 +528,7 @@ pub fn emitJavaScriptError(
         },
     }, .{ .emit_null_optional_fields = false }, &output.writer);
     try output.writer.writeByte('\n');
-    try self.file.seekFromEnd(0);
-    try self.file.writeAll(output.written());
+    try self.append(output.written());
 }
 
 pub fn emitApplicationStorageEntry(
@@ -547,7 +551,7 @@ pub fn emitApplicationStorageEntry(
         .id = event_id,
         .sessionId = self.session_id,
         .sequence = process_sequence,
-        .timestamp = std.time.milliTimestamp(),
+        .timestamp = datetime.milliTimestamp(.clock),
         .duration = @as(f64, 0),
         .kind = "log",
         .name = "storage-entry",
@@ -564,8 +568,7 @@ pub fn emitApplicationStorageEntry(
         },
     }, .{ .emit_null_optional_fields = false }, &output.writer);
     try output.writer.writeByte('\n');
-    try self.file.seekFromEnd(0);
-    try self.file.writeAll(output.written());
+    try self.append(output.written());
 }
 
 /// Records that the Core has atomically written a reconstructible state
@@ -589,7 +592,7 @@ pub fn emitExecutionCheckpoint(
         .id = event_id,
         .sessionId = self.session_id,
         .sequence = process_sequence,
-        .timestamp = std.time.milliTimestamp(),
+        .timestamp = datetime.milliTimestamp(.clock),
         .duration = @as(f64, 0),
         .kind = "log",
         .name = "execution-checkpoint",
@@ -613,8 +616,7 @@ pub fn emitExecutionCheckpoint(
         },
     }, .{}, &output.writer);
     try output.writer.writeByte('\n');
-    try self.file.seekFromEnd(0);
-    try self.file.writeAll(output.written());
+    try self.append(output.written());
 }
 
 fn executionCapabilities(self: *const Self) []const []const u8 {
@@ -665,7 +667,7 @@ fn readProcessSample() ProcessSample {
     var sample = ProcessSample{
         .logical_cpu_count = @intCast(std.Thread.getCpuCount() catch 0),
         .physical_memory_bytes = physicalMemoryBytes(),
-        .wall_time_us = std.time.microTimestamp(),
+        .wall_time_us = @intCast(datetime.microTimestamp(.clock)),
     };
 
     if (readRusage()) |usage| {

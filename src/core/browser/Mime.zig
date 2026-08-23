@@ -291,7 +291,7 @@ fn findAttrValue(attrs: []const u8, name: []const u8) ?[]const u8 {
 fn extractCharsetFromContentType(content: []const u8) ?[]const u8 {
     var it = std.mem.splitScalar(u8, content, ';');
     while (it.next()) |part| {
-        const trimmed = std.mem.trimLeft(u8, part, &.{ ' ', '\t' });
+        const trimmed = std.mem.trimStart(u8, part, &.{ ' ', '\t' });
         if (trimmed.len > 8 and std.ascii.eqlIgnoreCase(trimmed[0..8], "charset=")) {
             const val = std.mem.trim(u8, trimmed[8..], &.{ ' ', '\t', '"', '\'' });
             if (val.len > 0 and val.len <= 40) return val;
@@ -302,7 +302,7 @@ fn extractCharsetFromContentType(content: []const u8) ?[]const u8 {
 
 pub fn sniff(body: []const u8) ?Mime {
     // 0x0C is form feed
-    const content = std.mem.trimLeft(u8, body, &.{ ' ', '\t', '\n', '\r', 0x0C });
+    const content = std.mem.trimStart(u8, body, &.{ ' ', '\t', '\n', '\r', 0x0C });
     if (content.len == 0) {
         return null;
     }
@@ -512,11 +512,11 @@ fn validType(value: []const u8) bool {
 }
 
 fn trimLeft(s: []const u8) []const u8 {
-    return std.mem.trimLeft(u8, s, &std.ascii.whitespace);
+    return std.mem.trimStart(u8, s, &std.ascii.whitespace);
 }
 
 fn trimRight(s: []const u8) []const u8 {
-    return std.mem.trimRight(u8, s, &std.ascii.whitespace);
+    return std.mem.trimEnd(u8, s, &std.ascii.whitespace);
 }
 
 const testing = @import("../../testing/testing.zig");

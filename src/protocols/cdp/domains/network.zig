@@ -169,8 +169,8 @@ fn deleteCookies(cmd: *CDP.Command) !void {
 fn partitionSitesEqual(a: []const u8, b: []const u8) bool {
     if (std.mem.eql(u8, a, b)) return true;
     // "https://example.com" vs "https://example.com/"
-    const a_trim = std.mem.trimRight(u8, a, "/");
-    const b_trim = std.mem.trimRight(u8, b, "/");
+    const a_trim = std.mem.trimEnd(u8, a, "/");
+    const b_trim = std.mem.trimEnd(u8, b, "/");
     return std.mem.eql(u8, a_trim, b_trim);
 }
 

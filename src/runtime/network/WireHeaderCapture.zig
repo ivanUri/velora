@@ -1,4 +1,5 @@
 const std = @import("std");
+const runtime_io = @import("../../support/io.zig");
 const libcurl = @import("../../support/sys/libcurl.zig");
 const HttpClient = @import("../../core/browser/HttpClient.zig");
 const build_config = @import("build_config");
@@ -7,11 +8,11 @@ const Allocator = std.mem.Allocator;
 
 pub fn enabled() bool {
     if (comptime !build_config.curl_impersonate) return false;
-    return std.posix.getenv("KOKO_WIRE_HEADERS") != null;
+    return runtime_io.getenv("KOKO_WIRE_HEADERS") != null;
 }
 
-fn outputPath() ?[:0]const u8 {
-    return std.posix.getenv("KOKO_WIRE_HEADERS_FILE");
+fn outputPath() ?[]const u8 {
+    return runtime_io.getenv("KOKO_WIRE_HEADERS_FILE");
 }
 
 pub fn shouldCapture(url: []const u8, resource_type: HttpClient.RequestParams.ResourceType) bool {
@@ -56,9 +57,10 @@ pub const Session = struct {
         self.flushed = true;
 
         const path = outputPath() orelse return;
-        const file = try std.fs.cwd().createFile(path, .{ .truncate = false });
-        defer file.close();
-        try file.seekFromEnd(0);
+        const io = runtime_io.get();
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
+        defer file.close(io);
+        if (std.c.lseek(file.handle, 0, std.c.SEEK.END) < 0) return error.Unexpected;
 
         var request_lines = try std.ArrayList([]const u8).initCapacity(self.arena, 4);
         var headers = try std.ArrayList(HeaderEntry).initCapacity(self.arena, 32);
@@ -79,8 +81,9 @@ pub const Session = struct {
             try order.append(self.arena, parsed.name);
         }
 
-        var out = try std.ArrayList(u8).initCapacity(self.arena, 4096);
-        const w = out.writer(self.arena);
+        var out = try std.Io.Writer.Allocating.initCapacity(self.arena, 4096);
+        defer out.deinit();
+        const w = &out.writer;
         try w.print("{{\"url\":", .{});
         try writeJsonString(w, self.url);
         try w.print(",\"resourceType\":", .{});
@@ -109,7 +112,7 @@ pub const Session = struct {
             try w.writeAll("}");
         }
         try w.writeAll("]}\n");
-        try file.writeAll(out.items);
+        try file.writeStreamingAll(io, out.written());
     }
 };
 

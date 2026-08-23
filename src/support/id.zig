@@ -12,12 +12,13 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const runtime_io = @import("io.zig");
 
 pub fn uuidv4(hex: []u8) void {
     std.debug.assert(hex.len == 36);
 
     var bin: [16]u8 = undefined;
-    std.crypto.random.bytes(&bin);
+    runtime_io.get().random(&bin);
     bin[6] = (bin[6] & 0x0f) | 0x40;
     bin[8] = (bin[8] & 0x3f) | 0x80;
 

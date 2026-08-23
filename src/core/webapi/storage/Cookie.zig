@@ -12,6 +12,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const datetime = @import("../../../support/datetime.zig");
 
 const URL = @import("../../browser/URL.zig");
 const DateTime = @import("../../../support/datetime.zig").DateTime;
@@ -231,7 +232,7 @@ pub fn parse(allocator: Allocator, url: [:0]const u8, str: []const u8) !Cookie {
 
     var normalized_expires: ?f64 = null;
     if (max_age) |ma| {
-        normalized_expires = @floatFromInt(std.time.timestamp() + ma);
+        normalized_expires = @floatFromInt(@as(i64, @intCast(datetime.timestamp(.clock))) + ma);
     } else {
         // max age takes priority over expires
         if (expires) |expires_| {
@@ -551,7 +552,7 @@ pub const Jar = struct {
 
     pub fn init(allocator: Allocator) Jar {
         return .{
-            .cookies = .{},
+            .cookies = .empty,
             .allocator = allocator,
         };
     }
@@ -660,7 +661,7 @@ pub const Jar = struct {
 
     pub fn removeExpired(self: *Jar, request_time: ?i64) void {
         if (self.cookies.items.len == 0) return;
-        const time = request_time orelse std.time.timestamp();
+        const time = request_time orelse @as(i64, @intCast(datetime.timestamp(.clock)));
         var i: usize = self.cookies.items.len;
         while (i > 0) {
             i -= 1;
@@ -769,7 +770,7 @@ pub const Jar = struct {
             return;
         }
 
-        const now = std.time.timestamp();
+        const now: i64 = @intCast(datetime.timestamp(.clock));
         try self.addWithTopLevel(c, now, true, tl);
     }
 
@@ -975,11 +976,11 @@ fn trim(str: []const u8) []const u8 {
 }
 
 fn trimLeft(str: []const u8) []const u8 {
-    return std.mem.trimLeft(u8, str, &std.ascii.whitespace);
+    return std.mem.trimStart(u8, str, &std.ascii.whitespace);
 }
 
 fn trimRight(str: []const u8) []const u8 {
-    return std.mem.trimRight(u8, str, &std.ascii.whitespace);
+    return std.mem.trimEnd(u8, str, &std.ascii.whitespace);
 }
 
 fn toLower(str: []u8) []u8 {
@@ -1025,7 +1026,7 @@ test "Jar: add" {
         }
     }.expect;
 
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
 
     var jar = Jar.init(testing.allocator);
     defer jar.deinit();
@@ -1057,7 +1058,7 @@ test "Jar: add" {
 }
 
 test "Jar: non-HTTP add must not replace or duplicate an HttpOnly cookie" {
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
 
     var jar = Jar.init(testing.allocator);
     defer jar.deinit();
@@ -1079,7 +1080,7 @@ test "Jar: add limit" {
     var jar = Jar.init(testing.allocator);
     defer jar.deinit();
 
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
 
     // add a too big cookie value.
     try testing.expectError(error.CookieSizeExceeded, jar.add(.{
@@ -1130,7 +1131,7 @@ test "Jar: replacement succeeds at jar capacity" {
     var jar = Jar.init(testing.allocator);
     defer jar.deinit();
 
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
     var names: [max_jar_size][8]u8 = undefined;
     var lines: [max_jar_size][16]u8 = undefined;
     for (0..max_jar_size) |i| {
@@ -1145,7 +1146,7 @@ test "Jar: replacement succeeds at jar capacity" {
 }
 
 test "Jar: HTTP and script cookies commit immediately for all names" {
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
     var jar = Jar.init(testing.allocator);
     defer jar.deinit();
 
@@ -1153,27 +1154,27 @@ test "Jar: HTTP and script cookies commit immediately for all names" {
     try jar.add(try Cookie.parse(testing.allocator, test_url, "AEC=1"), now, true);
     try jar.add(try Cookie.parse(testing.allocator, test_url, "session_state=value"), now, false);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try jar.forRequest(test_url, buf.writer(testing.allocator), .{
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    try jar.forRequest(test_url, &buf.writer, .{
         .is_http = true,
         .is_navigation = true,
         .nav_generation = jar.document_nav_generation,
     });
-    try testing.expectEqualStrings("AEC=1; session_state=value", buf.items);
+    try testing.expectEqualStrings("AEC=1; session_state=value", buf.written());
 }
 
 test "Jar: forRequest" {
     const expectCookies = struct {
         fn expect(expected: []const u8, jar: *Jar, target_url: [:0]const u8, opts: Jar.LookupOpts) !void {
-            var arr: std.ArrayList(u8) = .empty;
-            defer arr.deinit(testing.allocator);
-            try jar.forRequest(target_url, arr.writer(testing.allocator), opts);
-            try testing.expectEqual(expected, arr.items);
+            var arr: std.Io.Writer.Allocating = .init(testing.allocator);
+            defer arr.deinit();
+            try jar.forRequest(target_url, &arr.writer, opts);
+            try testing.expectEqual(expected, arr.written());
         }
     }.expect;
 
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
 
     var jar = Jar.init(testing.allocator);
     defer jar.deinit();
@@ -1312,7 +1313,7 @@ test "Jar: forRequest" {
 }
 
 test "Jar: document.cookie orders by path length then creation time" {
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
     var jar = Jar.init(testing.allocator);
     defer jar.deinit();
 
@@ -1321,48 +1322,48 @@ test "Jar: document.cookie orders by path length then creation time" {
     try jar.add(try Cookie.parse(testing.allocator, target, "testB=4; path=/cookies/attributes/resources/path"), now, true);
     try jar.add(try Cookie.parse(testing.allocator, target, "testA=4; path=/cookies"), now, true);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try jar.forRequest(target, buf.writer(testing.allocator), .{
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    try jar.forRequest(target, &buf.writer, .{
         .is_http = false,
         .is_navigation = true,
         .origin_url = target,
     });
-    try testing.expectEqualStrings("testB=4; testZ=4; testA=4", buf.items);
+    try testing.expectEqualStrings("testB=4; testZ=4; testA=4", buf.written());
 }
 
 test "Jar: loopback aliases share same-site for cookie attachment" {
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
     var jar = Jar.init(testing.allocator);
     defer jar.deinit();
 
     try jar.add(try Cookie.parse(testing.allocator, "http://127.0.0.1:8000/", "COOKIE_NAME=1;Path=/workers/modules/"), now, true);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try jar.forRequest("http://www1.localhost:8000/workers/modules/resources/export-credentials.py", buf.writer(testing.allocator), .{
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    try jar.forRequest("http://www1.localhost:8000/workers/modules/resources/export-credentials.py", &buf.writer, .{
         .origin_url = "http://localhost:8000/",
         .is_http = true,
         .is_navigation = false,
     });
-    try testing.expectEqualStrings("COOKIE_NAME=1", buf.items);
+    try testing.expectEqualStrings("COOKIE_NAME=1", buf.written());
 }
 
 test "Jar: host-only localhost cookie does not leak to subdomains" {
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
     var jar = Jar.init(testing.allocator);
     defer jar.deinit();
 
     try jar.add(try Cookie.parse(testing.allocator, "https://localhost:8443/", "domain-attribute-missing=b;Path=/"), now, true);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try jar.forRequest("https://www1.localhost:8443/cookies/resources/list.py", buf.writer(testing.allocator), .{
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    try jar.forRequest("https://www1.localhost:8443/cookies/resources/list.py", &buf.writer, .{
         .origin_url = "https://localhost:8443/",
         .is_http = true,
         .is_navigation = false,
     });
-    try testing.expectEqualStrings("", buf.items);
+    try testing.expectEqualStrings("", buf.written());
 }
 
 test "Cookie: parse key=value" {
@@ -1557,18 +1558,19 @@ test "Cookie: attribute section CTL rejects cookie" {
 }
 
 test "Cookie: parse max-age" {
+    const now: i64 = @intCast(datetime.timestamp(.clock));
     try expectAttribute(.{ .expires = null }, null, "b;max-age");
     try expectAttribute(.{ .expires = null }, null, "b;max-age=abc");
     try expectAttribute(.{ .expires = null }, null, "b;max-age=13.22");
     try expectAttribute(.{ .expires = null }, null, "b;max-age=13abc");
 
-    try expectAttribute(.{ .expires = std.time.timestamp() + 13 }, null, "b;max-age=13");
-    try expectAttribute(.{ .expires = std.time.timestamp() + -22 }, null, "b;max-age=-22");
-    try expectAttribute(.{ .expires = std.time.timestamp() + 4294967296 }, null, "b;max-age=4294967296");
-    try expectAttribute(.{ .expires = std.time.timestamp() + -4294967296 }, null, "b;Max-Age= -4294967296");
-    try expectAttribute(.{ .expires = std.time.timestamp() + 0 }, null, "b; Max-Age=0");
-    try expectAttribute(.{ .expires = std.time.timestamp() + 500 }, null, "b; Max-Age = 500  ; Max-Age=invalid");
-    try expectAttribute(.{ .expires = std.time.timestamp() + 1000 }, null, "b;max-age=600;max-age=0;max-age = 1000");
+    try expectAttribute(.{ .expires = now + 13 }, null, "b;max-age=13");
+    try expectAttribute(.{ .expires = now - 22 }, null, "b;max-age=-22");
+    try expectAttribute(.{ .expires = now + 4294967296 }, null, "b;max-age=4294967296");
+    try expectAttribute(.{ .expires = now - 4294967296 }, null, "b;Max-Age= -4294967296");
+    try expectAttribute(.{ .expires = now }, null, "b; Max-Age=0");
+    try expectAttribute(.{ .expires = now + 500 }, null, "b; Max-Age = 500  ; Max-Age=invalid");
+    try expectAttribute(.{ .expires = now + 1000 }, null, "b;max-age=600;max-age=0;max-age = 1000");
 }
 
 test "Cookie: parse expires" {
@@ -1580,7 +1582,7 @@ test "Cookie: parse expires" {
     try expectAttribute(.{ .expires = 1918798080 }, null, "b;expires=Wed, 21 Oct 2030 07:28:00 GMT");
     try expectAttribute(.{ .expires = 1784275395 }, null, "b;expires=Fri, 17-Jul-2026 08:03:15 GMT");
     // max-age has priority over expires
-    try expectAttribute(.{ .expires = std.time.timestamp() + 10 }, null, "b;Max-Age=10; expires=Wed, 21 Oct 2030 07:28:00 GMT");
+    try expectAttribute(.{ .expires = datetime.timestamp(.clock) + 10 }, null, "b;Max-Age=10; expires=Wed, 21 Oct 2030 07:28:00 GMT");
 }
 
 test "Cookie: parse all" {
@@ -1598,7 +1600,7 @@ test "Cookie: parse all" {
         .http_only = true,
         .secure = true,
         .domain = ".kokoio.com",
-        .expires = @floatFromInt(std.time.timestamp() + 30),
+        .expires = @floatFromInt(datetime.timestamp(.clock) + 30),
     }, "https://kokoio.com/cms/users", "user-id=9000; HttpOnly; Max-Age=30; Secure; path=/; Domain=kokoio.com");
 
     try expectCookie(.{
@@ -1609,7 +1611,7 @@ test "Cookie: parse all" {
         .secure = false,
         .domain = ".localhost",
         .same_site = .lax,
-        .expires = @floatFromInt(std.time.timestamp() + 7200),
+        .expires = @floatFromInt(datetime.timestamp(.clock) + 7200),
     }, "http://localhost:8000/login", "app_session=123; Max-Age=7200; path=/; domain=localhost; httponly; samesite=lax");
 }
 
@@ -1798,31 +1800,31 @@ test "Cookie: schemeful same-site treats http/https as cross-site" {
 }
 
 test "Cookie: origin port binding" {
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
     var jar = Jar.init(testing.allocator);
     defer jar.deinit();
 
     try jar.add(try Cookie.parse(testing.allocator, "http://kokoio.com:8000/", "port=1;Path=/"), now, true);
     try jar.add(try Cookie.parse(testing.allocator, "http://kokoio.com:9000/", "port=2;Path=/"), now, true);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try jar.forRequest("http://kokoio.com:8000/", buf.writer(testing.allocator), .{
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    try jar.forRequest("http://kokoio.com:8000/", &buf.writer, .{
         .origin_url = "http://kokoio.com:8000/",
         .is_http = true,
     });
-    try testing.expectEqualStrings("port=1", buf.items);
+    try testing.expectEqualStrings("port=1", buf.written());
 
     buf.clearRetainingCapacity();
-    try jar.forRequest("http://kokoio.com:9000/", buf.writer(testing.allocator), .{
+    try jar.forRequest("http://kokoio.com:9000/", &buf.writer, .{
         .origin_url = "http://kokoio.com:9000/",
         .is_http = true,
     });
-    try testing.expectEqualStrings("port=2", buf.items);
+    try testing.expectEqualStrings("port=2", buf.written());
 }
 
 test "Cookie: third-party context blocks non-partitioned cookies" {
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
     var jar = Jar.init(testing.allocator);
     defer jar.deinit();
 
@@ -1832,13 +1834,13 @@ test "Cookie: third-party context blocks non-partitioned cookies" {
     try testing.expect(jar.cookies.items[1].partitioned);
     try testing.expectEqualStrings("https:other.com", jar.cookies.items[1].partition_site.?);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try jar.forRequest("https://kokoio.com/", buf.writer(testing.allocator), .{
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    try jar.forRequest("https://kokoio.com/", &buf.writer, .{
         .origin_url = "https://other.com/",
         .top_level_url = "https://other.com/",
         .is_http = false,
         .is_navigation = false,
     });
-    try testing.expectEqualStrings("allowed=1", buf.items);
+    try testing.expectEqualStrings("allowed=1", buf.written());
 }

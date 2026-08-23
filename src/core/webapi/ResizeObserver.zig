@@ -24,7 +24,7 @@ pub const ResizeObserver = @This();
 _rc: RC(u8) = .init(0),
 _arena: Allocator,
 _callback: js.Function.Temp,
-_observing: std.ArrayList(*Element) = .{},
+_observing: std.ArrayList(*Element) = .empty,
 _delivery_scheduled: bool = false,
 
 pub fn init(callback: js.Function.Temp, frame: *Frame) !*ResizeObserver {

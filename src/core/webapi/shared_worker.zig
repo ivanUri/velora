@@ -236,8 +236,8 @@ pub const SharedWorkerRuntime = struct {
     options: NormalizedOptions,
     host: *Worker,
     state: State = .loading,
-    pending_connects: std.ArrayList(PendingConnect) = .{},
-    clients: std.ArrayList(*SharedWorker) = .{},
+    pending_connects: std.ArrayList(PendingConnect) = .empty,
+    clients: std.ArrayList(*SharedWorker) = .empty,
 
     pub const NormalizedOptions = struct {
         script_type: Worker.WorkerType = .classic,

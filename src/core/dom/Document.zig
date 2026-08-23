@@ -888,7 +888,7 @@ pub fn getDocType(self: *Document) ?*Node {
 // reasonable for 2 frames to document.write("<html>...</html>") into their own
 // frame.
 fn looksLikeNewDocument(html: []const u8) bool {
-    const trimmed = std.mem.trimLeft(u8, html, &std.ascii.whitespace);
+    const trimmed = std.mem.trimStart(u8, html, &std.ascii.whitespace);
     return std.ascii.startsWithIgnoreCase(trimmed, "<!DOCTYPE") or
         std.ascii.startsWithIgnoreCase(trimmed, "<html");
 }

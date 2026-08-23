@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const log = @import("../../support/log.zig");
+const runtime_io = @import("../../support/io.zig");
 const ProfileManager = @import("ProfileManager.zig");
 
 const Allocator = std.mem.Allocator;
@@ -97,8 +98,9 @@ pub const ProfilePaths = struct {
     }
 
     pub fn ensureProfileReadyWithFingerprint(self: *const ProfilePaths, fingerprint: []const u8) !void {
-        try std.fs.cwd().makePath(self.user_data_dir);
-        try std.fs.cwd().makePath(self.profile_dir);
+        const io = runtime_io.get();
+        try std.Io.Dir.cwd().createDirPath(io, self.user_data_dir);
+        try std.Io.Dir.cwd().createDirPath(io, self.profile_dir);
 
         var prefs_buf: [512]u8 = undefined;
         const prefs_path = self.preferencesPath(&prefs_buf) orelse return error.PathTooLong;
@@ -119,7 +121,7 @@ pub const ProfilePaths = struct {
         var prefs_buf: [512]u8 = undefined;
         const prefs_path = self.preferencesPath(&prefs_buf) orelse return error.PathTooLong;
 
-        const bytes = std.fs.cwd().readFileAlloc(arena, prefs_path, 64 * 1024) catch |err| switch (err) {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(runtime_io.get(), prefs_path, arena, .limited(64 * 1024)) catch |err| switch (err) {
             error.FileNotFound => {
                 return .{
                     .name = self.profile_name,
@@ -143,26 +145,40 @@ pub const ProfilePaths = struct {
     }
 };
 
-fn defaultUserDataDir(allocator: Allocator) ![]const u8 {
+pub fn defaultUserDataDir(allocator: Allocator) ![]const u8 {
     if (builtin.is_test) {
         return try allocator.dupe(u8, "/tmp/koko-test-user-data");
     }
-    return std.fs.getAppDataDir(allocator, "koko") catch |err| {
-        log.warn(.app, "profile_paths.app_data_dir", .{ .err = err });
-        return try allocator.dupe(u8, ".koko-user-data");
+    const environ = runtime_io.environ() orelse return try allocator.dupe(u8, ".koko-user-data");
+    return switch (builtin.os.tag) {
+        .windows => if (environ.get("LOCALAPPDATA")) |base|
+            try std.fs.path.join(allocator, &.{ base, "koko" })
+        else
+            try allocator.dupe(u8, ".koko-user-data"),
+        .macos => if (environ.get("HOME")) |home|
+            try std.fs.path.join(allocator, &.{ home, "Library", "Application Support", "koko" })
+        else
+            try allocator.dupe(u8, ".koko-user-data"),
+        else => if (environ.get("XDG_DATA_HOME")) |base|
+            try std.fs.path.join(allocator, &.{ base, "koko" })
+        else if (environ.get("HOME")) |home|
+            try std.fs.path.join(allocator, &.{ home, ".local", "share", "koko" })
+        else
+            try allocator.dupe(u8, ".koko-user-data"),
     };
 }
 
 fn fileExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    std.Io.Dir.cwd().access(runtime_io.get(), path, .{}) catch return false;
     return true;
 }
 
 fn writePreferences(path: []const u8, prefs: Preferences) !void {
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
+    const io = runtime_io.get();
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer file.close(io);
     var buf: [1024]u8 = undefined;
-    var writer = file.writer(&buf);
+    var writer = file.writer(io, &buf);
     try std.json.Stringify.value(.{
         .version = 3,
         .name = prefs.name,

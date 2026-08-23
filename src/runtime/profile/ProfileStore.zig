@@ -1,4 +1,5 @@
 const std = @import("std");
+const runtime_io = @import("../../support/io.zig");
 const c = std.c;
 const Profile = @import("Profile.zig");
 const ProfilePaths = @import("ProfilePaths.zig");
@@ -13,6 +14,12 @@ const MathsNative = @import("MathsNative.zig");
 const FingerprintStore = @import("FingerprintStore.zig");
 const BrowserPersonaModule = @import("BrowserPersona.zig");
 const BrowserPersona = BrowserPersonaModule.BrowserPersona;
+
+fn appendPrint(list: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime format: []const u8, args: anytype) !void {
+    const text = try std.fmt.allocPrint(allocator, format, args);
+    defer allocator.free(text);
+    try list.appendSlice(allocator, text);
+}
 
 fn resolveAssetPath(allocator: std.mem.Allocator, root: []const u8, path: []const u8) ![]const u8 {
     if (path.len == 0) return error.EmptyPath;
@@ -29,7 +36,7 @@ fn resolveAssetPath(allocator: std.mem.Allocator, root: []const u8, path: []cons
 fn readAssetFile(allocator: std.mem.Allocator, root: []const u8, path: []const u8, limit: usize) ![]u8 {
     const resolved = try resolveAssetPath(allocator, root, path);
     defer allocator.free(resolved);
-    return std.fs.cwd().readFileAlloc(allocator, resolved, limit);
+    return std.Io.Dir.cwd().readFileAlloc(runtime_io.get(), resolved, allocator, .limited(limit));
 }
 const ClientRectsIntelligent = @import("ClientRectsIntelligent.zig");
 const SvgIntelligent = @import("SvgIntelligent.zig");
@@ -388,7 +395,7 @@ pub fn resolve(paths: *const ProfilePaths.ProfilePaths) !LoadedProfile {
     );
     defer fp_src.deinit(std.heap.page_allocator);
 
-    const bytes = try std.fs.cwd().readFileAlloc(std.heap.page_allocator, fp_src.definition_path, 1024 * 1024);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(runtime_io.get(), fp_src.definition_path, std.heap.page_allocator, .limited(1024 * 1024));
     defer std.heap.page_allocator.free(bytes);
 
     var loaded = try parseJson(bytes, fp_src.root);
@@ -1041,9 +1048,9 @@ fn argsToJson(allocator: std.mem.Allocator, args: []std.json.Value) ![]const u8 
     for (args, 0..) |arg, idx| {
         if (idx > 0) try json.append(allocator, ',');
         switch (arg) {
-            .integer => |n| try json.writer(allocator).print("{d}", .{n}),
-            .float => |f| try json.writer(allocator).print("{d}", .{f}),
-            .bool => |b| try json.writer(allocator).print("{}", .{b}),
+            .integer => |n| try appendPrint(&json, allocator, "{d}", .{n}),
+            .float => |f| try appendPrint(&json, allocator, "{d}", .{f}),
+            .bool => |b| try appendPrint(&json, allocator, "{}", .{b}),
             .null => try json.appendSlice(allocator, "null"),
             else => try json.append(allocator, '0'),
         }
@@ -1209,7 +1216,7 @@ fn buildSecChUa(allocator: std.mem.Allocator, brands: []const Brand) ![:0]u8 {
     for (brands, 0..) |brand, i| {
         const sep = if (i == 0) " " else ", ";
         try list.appendSlice(allocator, sep);
-        try list.writer(allocator).print("\"{s}\";v=\"{s}\"", .{ brand.brand, brand.version });
+        try appendPrint(&list, allocator, "\"{s}\";v=\"{s}\"", .{ brand.brand, brand.version });
     }
     try list.append(allocator, 0);
     const slice = try list.toOwnedSlice(allocator);
@@ -1224,9 +1231,9 @@ fn buildAcceptLanguage(allocator: std.mem.Allocator, languages: []const []const 
         if (i > 0) try list.append(allocator, ',');
         switch (i) {
             0 => try list.appendSlice(allocator, lang),
-            1 => try list.writer(allocator).print("{s};q=0.9", .{lang}),
-            2 => try list.writer(allocator).print("{s};q=0.8", .{lang}),
-            else => try list.writer(allocator).print("{s};q=0.7", .{lang}),
+            1 => try appendPrint(&list, allocator, "{s};q=0.9", .{lang}),
+            2 => try appendPrint(&list, allocator, "{s};q=0.8", .{lang}),
+            else => try appendPrint(&list, allocator, "{s};q=0.7", .{lang}),
         }
     }
     try list.append(allocator, 0);
@@ -1291,7 +1298,7 @@ test "ProfileStore: assets cannot escape fingerprint folder" {
 fn testPaths(allocator: std.mem.Allocator, profile_name: []const u8) !ProfilePaths.ProfilePaths {
     const base = try std.fmt.allocPrint(allocator, "/tmp/koko-profilestore-test-{s}", .{profile_name});
     defer allocator.free(base);
-    std.fs.cwd().deleteTree(base) catch {};
+    std.Io.Dir.cwd().deleteTree(runtime_io.get(), base) catch {};
     var paths = try ProfilePaths.ProfilePaths.init(allocator, base, profile_name, null);
     try paths.ensureProfileReady();
     return paths;

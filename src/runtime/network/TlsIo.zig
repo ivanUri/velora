@@ -18,7 +18,7 @@ const std = @import("std");
 const posix = std.posix;
 
 const ssl_c = @cImport({
-    @cInclude("openssl/ssl.h");
+    @cInclude("boringssl_zig_compat.h");
 });
 
 const TlsIo = @This();

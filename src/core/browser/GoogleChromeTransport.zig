@@ -1,8 +1,9 @@
 // Fetch Google document navigations via real Chrome (Playwright helper script).
 const std = @import("std");
 const base64 = std.base64;
-const posix = std.posix;
+const posix = @import("../../support/posix.zig");
 const log = @import("../../support/log.zig");
+const runtime_io = @import("../../support/io.zig");
 
 const http = @import("../../runtime/network/http.zig");
 
@@ -45,11 +46,10 @@ pub const AsyncJob = struct {
     pub fn deinit(self: *AsyncJob, _: Allocator) void {
         if (self.child) |*child| {
             if (!self.child_waited) {
-                _ = child.kill() catch {};
-                _ = child.wait() catch {};
+                child.kill(runtime_io.get());
             }
-            if (child.stdout) |stdout| stdout.close();
-            if (child.stderr) |stderr| stderr.close();
+            if (child.stdout) |stdout| stdout.close(runtime_io.get());
+            if (child.stderr) |stderr| stderr.close(runtime_io.get());
         }
     }
 
@@ -77,7 +77,7 @@ pub const AsyncJob = struct {
             return .{ .err = err };
         };
 
-        const wait = posix.waitpid(child.id, 1); // WNOHANG
+        const wait = posix.waitpid(child.id orelse return .running, 1); // WNOHANG
         if (wait.pid == 0) return .running;
         // Child exited — drain any remaining pipe bytes before parsing JSON.
         self.drainPipe(child.stdout, &self.stdout) catch |err| {
@@ -118,23 +118,24 @@ pub const AsyncJob = struct {
 
     fn spawnChild(self: *AsyncJob) !void {
         const script = scriptPath() orelse return error.ChromeTransportScriptNotFound;
-        var child = std.process.Child.init(&.{ "node", script }, self.arena);
-        if (std.posix.getenv("KOKO_ROOT")) |root| {
-            child.cwd = root;
-        }
-        var env_map = try std.process.getEnvMap(self.arena);
+        const io = runtime_io.get();
+        const process_environ = runtime_io.environ() orelse return error.MissingProcessEnvironment;
+        var env_map = try process_environ.clone(self.arena);
         if (env_map.get("KOKO_CHROME_SPAWN") == null) {
             try env_map.put("KOKO_CHROME_SPAWN", "1");
         }
-        child.env_map = &env_map;
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-        try child.spawn();
+        const child = try std.process.spawn(io, .{
+            .argv = &.{ "node", script },
+            .cwd = if (runtime_io.getenv("KOKO_ROOT")) |root| .{ .path = root } else .inherit,
+            .environ_map = &env_map,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        });
 
         if (child.stdin) |stdin| {
-            try stdin.writeAll(self.stdin_json);
-            stdin.close();
+            try stdin.writeStreamingAll(io, self.stdin_json);
+            stdin.close(io);
         }
         if (child.stdout) |stdout| try setNonBlocking(stdout);
         if (child.stderr) |stderr| try setNonBlocking(stderr);
@@ -142,19 +143,20 @@ pub const AsyncJob = struct {
         self.child = child;
     }
 
-    fn setNonBlocking(file: std.fs.File) !void {
+    fn setNonBlocking(file: std.Io.File) !void {
         const fd = file.handle;
         const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
         const nonblocking = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
         _ = try posix.fcntl(fd, posix.F.SETFL, flags | nonblocking);
     }
 
-    fn drainPipe(self: *AsyncJob, pipe: ?std.fs.File, buf: *std.ArrayList(u8)) !void {
+    fn drainPipe(self: *AsyncJob, pipe: ?std.Io.File, buf: *std.ArrayList(u8)) !void {
         const file = pipe orelse return;
         var tmp: [16 * 1024]u8 = undefined;
         while (true) {
-            const n = posix.read(file.handle, &tmp) catch |err| switch (err) {
+            const n = file.readStreaming(runtime_io.get(), &.{&tmp}) catch |err| switch (err) {
                 error.WouldBlock => return,
+                error.EndOfStream => return,
                 else => return err,
             };
             if (n == 0) return;
@@ -167,7 +169,7 @@ pub fn buildRequestJson(allocator: Allocator, url: [:0]const u8, headers: http.H
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try buf.append(allocator, '{');
-    try buf.writer(allocator).print("\"url\":", .{});
+    try buf.appendSlice(allocator, "\"url\":");
     try appendJsonString(allocator, &buf, url);
     try buf.appendSlice(allocator, ",\"headers\":[");
     var first = true;
@@ -200,8 +202,8 @@ fn appendJsonString(allocator: Allocator, buf: *std.ArrayList(u8), s: []const u8
     try buf.append(allocator, '"');
 }
 
-fn scriptPath() ?[:0]const u8 {
-    if (std.posix.getenv("KOKO_CHROME_TRANSPORT_SCRIPT")) |p| return p;
+fn scriptPath() ?[]const u8 {
+    if (runtime_io.getenv("KOKO_CHROME_TRANSPORT_SCRIPT")) |p| return p;
     return "scripts/chrome-google-transport.mjs";
 }
 

@@ -13,7 +13,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
-const posix = std.posix;
+const posix = @import("../../support/posix.zig");
+const net = @import("../../support/net.zig");
 
 const Config = @import("../Config.zig");
 const libcurl = @import("../../support/sys/libcurl.zig");
@@ -319,7 +320,7 @@ fn opensocketCallback(
     const filter: *const IpFilter = @ptrCast(@alignCast(clientp orelse return libcurl.CURL_SOCKET_BAD));
     if (filter.isBlockedSockaddr(address)) {
         if (address.family == posix.AF.INET or address.family == posix.AF.INET6) {
-            const ip = std.net.Address.initPosix(@ptrCast(&address.addr));
+            const ip = net.Address.initPosix(@ptrCast(&address.addr));
             log.warn(.http, "blocked by IP filter", .{ .ip = ip });
         } else {
             log.warn(.http, "blocked by IP filter", .{ .family = address.family });

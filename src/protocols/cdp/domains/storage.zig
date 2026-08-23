@@ -12,6 +12,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const datetime = @import("../../../support/datetime.zig");
 
 const CDP = @import("../CDP.zig");
 const URL = @import("../../../core/browser/URL.zig");
@@ -166,7 +167,7 @@ pub fn setCdpCookie(cookie_jar: *CookieJar, param: CdpCookie) !void {
         .source_secure = URL.isSecureOrigin(source_url),
         .source_port = Cookie.canonicalPort(source_url),
     };
-    try cookie_jar.addWithTopLevel(cookie, std.time.timestamp(), true, top_level_url);
+    try cookie_jar.addWithTopLevel(cookie, @intCast(datetime.timestamp(.clock)), true, top_level_url);
 }
 
 pub const CookieWriter = struct {

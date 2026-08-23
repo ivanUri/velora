@@ -71,11 +71,11 @@ pub fn init(arena: Allocator) EventManagerBase {
     return .{
         .arena = arena,
         .lookup = .{},
-        .list_pool = .init(arena),
-        .listener_pool = .init(arena),
+        .list_pool = .empty,
+        .listener_pool = .empty,
         .dispatch_depth = 0,
-        .deferred_removals = .{},
-        .deferred_abort_fires = .{},
+        .deferred_removals = .empty,
+        .deferred_abort_fires = .empty,
     };
 }
 
@@ -288,7 +288,7 @@ pub fn register(self: *EventManagerBase, target: *EventTarget, typ: []const u8, 
             node = n.next;
         }
     } else {
-        gop.value_ptr.* = try self.list_pool.create();
+        gop.value_ptr.* = try self.list_pool.create(self.arena);
         gop.value_ptr.*.* = .{};
     }
 
@@ -297,7 +297,7 @@ pub fn register(self: *EventManagerBase, target: *EventTarget, typ: []const u8, 
         .object => |o| Function{ .object = try o.persist() },
     };
 
-    const listener = try self.listener_pool.create();
+    const listener = try self.listener_pool.create(self.arena);
     listener.* = .{
         .node = .{},
         .once = opts.once,

@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const posix = std.posix;
+const net = @import("../../support/net.zig");
 const libcurl = @import("../../support/sys/libcurl.zig");
 
 const IpFilter = @This();
@@ -144,8 +145,8 @@ fn parseIpv4(str: []const u8) ?Ipv4Addr {
 fn parseIpv6(str: []const u8) ?Ipv6Addr {
     // Strip zone ID
     const clean = if (std.mem.indexOfScalar(u8, str, '%')) |idx| str[0..idx] else str;
-    const parsed = std.net.Address.parseIp6(clean, 0) catch return null;
-    return parsed.in6.sa.addr;
+    const parsed = net.Address.parseIp6(clean, 0) catch return null;
+    return parsed.in6.addr;
 }
 
 // ── CIDR matching ────────────────────────────────────────────────────────────
@@ -323,7 +324,7 @@ fn isBlockedV6(self: *const IpFilter, addr: Ipv6Addr) bool {
 
 /// Check if a resolved `std.net.Address` should be blocked (native WebSocket, etc.).
 /// Fail-closed: unknown address family -> true (blocked).
-pub fn isBlockedAddress(self: *const IpFilter, addr: std.net.Address) bool {
+pub fn isBlockedAddress(self: *const IpFilter, addr: net.Address) bool {
     switch (addr.any.family) {
         posix.AF.INET => {
             const sin: *const posix.sockaddr.in = @ptrCast(@alignCast(&addr.any));

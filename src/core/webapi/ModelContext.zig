@@ -26,7 +26,7 @@ pub fn registerTypes() []const type {
 
 const ModelContext = @This();
 
-_tools: std.ArrayList(*Tool) = .{},
+_tools: std.ArrayList(*Tool) = .empty,
 
 pub const init: ModelContext = .{};
 

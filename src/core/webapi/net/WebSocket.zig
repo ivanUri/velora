@@ -256,16 +256,15 @@ fn applyHandshakeSetCookies(self: *WebSocket, set_cookies: []const []const u8) v
 }
 
 fn getHandshakeCookieHeader(self: *WebSocket) !?[]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(self._arena);
-    try self._frame._session.cookie_jar.forRequest(self._url, buf.writer(self._arena), .{
+    var buf = std.Io.Writer.Allocating.init(self._arena);
+    try self._frame._session.cookie_jar.forRequest(self._url, &buf.writer, .{
         .is_http = true,
         .origin_url = self._frame.url,
         .top_level_url = self._frame.topLevelUrl(),
         .is_navigation = false,
     });
-    if (buf.items.len == 0) return null;
-    return try self._arena.dupe(u8, buf.items);
+    if (buf.written().len == 0) return null;
+    return try self._arena.dupe(u8, buf.written());
 }
 
 /// Promote to OPEN and fire the open event when the native client is ready but

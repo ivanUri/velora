@@ -4,6 +4,7 @@
 // Architecture: single jar (document.cookie / HTTP / CDP / this API). No second store.
 
 const std = @import("std");
+const datetime = @import("../../support/datetime.zig");
 const js = @import("../js/js.zig");
 const Frame = @import("../browser/Frame.zig");
 const Cookie = @import("storage/Cookie.zig");
@@ -96,9 +97,8 @@ pub const CookieStore = struct {
         }
 
         // Build a Set-Cookie-like string and reuse Cookie.parse for attribute rules.
-        var list: std.ArrayList(u8) = .empty;
-        defer list.deinit(local.call_arena);
-        const w = list.writer(local.call_arena);
+        var list = std.Io.Writer.Allocating.init(local.call_arena);
+        const w = &list.writer;
         try w.print("{s}={s}", .{ opts.name, opts.value });
         if (opts.domain) |d| try w.print("; Domain={s}", .{d});
         if (opts.path) |p| try w.print("; Path={s}", .{p});
@@ -111,7 +111,7 @@ pub const CookieStore = struct {
         if (opts.sameSite) |ss| try w.print("; SameSite={s}", .{ss});
         if (opts.partitioned == true) try w.writeAll("; Partitioned");
 
-        var c = Cookie.parse(jar.allocator, cookie_url, list.items) catch |err| {
+        var c = Cookie.parse(jar.allocator, cookie_url, list.written()) catch |err| {
             return local.rejectPromise(.{ .type_error = @errorName(err) });
         };
         // Cookie Store cannot set HttpOnly (JS surface).
@@ -124,7 +124,7 @@ pub const CookieStore = struct {
             c.expires = ex_ms / 1000.0;
         }
 
-        jar.addWithTopLevel(c, std.time.timestamp(), false, frame.topLevelUrl()) catch |err| {
+        jar.addWithTopLevel(c, @intCast(datetime.timestamp(.clock)), false, frame.topLevelUrl()) catch |err| {
             c.deinit();
             return local.rejectPromise(.{ .type_error = @errorName(err) });
         };
@@ -241,16 +241,15 @@ fn cookieVisibleToDocument(c: *const Cookie, cookie_url: [:0]const u8, frame: *F
         return false;
     }
     // Match via forRequest semantics: collect names that appear.
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(frame.call_arena);
-    frame._session.cookie_jar.forRequest(cookie_url, buf.writer(frame.call_arena), .{
+    var buf = std.Io.Writer.Allocating.init(frame.call_arena);
+    frame._session.cookie_jar.forRequest(cookie_url, &buf.writer, .{
         .is_http = false,
         .is_navigation = true,
         .origin_url = cookie_url,
         .top_level_url = frame.topLevelUrl(),
     }) catch return false;
     // forRequest joins all; check name= substring carefully
-    return cookieNameInCookieHeader(buf.items, c.name);
+    return cookieNameInCookieHeader(buf.written(), c.name);
 }
 
 fn cookieNameInCookieHeader(header: []const u8, name: []const u8) bool {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../../support/sync.zig");
 
 pub const Allocator = std.mem.Allocator;
 
@@ -56,8 +57,8 @@ pub const StorageKey = struct {
 };
 
 pub const Barrier = struct {
-    mutex: std.Thread.Mutex = .{},
-    cond: std.Thread.Condition = .{},
+    mutex: sync.Mutex = .{},
+    cond: sync.Condition = .{},
     done: bool = false,
     failed: bool = false,
 };

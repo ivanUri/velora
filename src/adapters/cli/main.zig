@@ -24,7 +24,10 @@ const Config = v.Config;
 const SigHandler = @import("Sighandler.zig");
 pub const panic = v.crash_handler.panic;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    v.io.set(init.io);
+    v.io.setEnviron(init.environ_map);
+
     // Raise soft stack limit toward hard (macOS default soft ~8MB). V8 module
     // graphs (InnerModuleEvaluation) and SPA script eval need headroom beyond
     // the default or they V8_Fatal before DOMContentLoaded.
@@ -51,19 +54,19 @@ pub fn main() !void {
     const main_arena = main_arena_instance.allocator();
     defer main_arena_instance.deinit();
 
-    run(gpa, main_arena) catch |err| {
+    run(gpa, main_arena, init.minimal.args) catch |err| {
         log.fatal(.app, "exit", .{ .err = err });
-        std.posix.exit(1);
+        std.c.exit(1);
     };
 }
 
-fn run(allocator: Allocator, main_arena: Allocator) !void {
+fn run(allocator: Allocator, main_arena: Allocator, process_args: std.process.Args) !void {
     // Config must live on the heap: fetch/curl worker threads read app.config
     // while the main thread is in network.run(). Stack-allocated Config caused
     // torn reads of profile.policies (segfault in PolicyRegistry.policyEnabled).
     const config = try allocator.create(Config);
     var config_owned_by_error_path = true;
-    try Config.parseArgsInPlace(config, main_arena, allocator);
+    try Config.parseArgsInPlace(config, main_arena, allocator, process_args);
     errdefer if (config_owned_by_error_path) {
         config.deinit(allocator);
         allocator.destroy(config);
@@ -83,20 +86,20 @@ fn run(allocator: Allocator, main_arena: Allocator) !void {
             };
             config.deinit(allocator);
             allocator.destroy(config);
-            return std.process.cleanExit();
+            return std.process.cleanExit(v.io.get());
         },
         .help => {
             config.printUsageAndExit(true);
             config.deinit(allocator);
             allocator.destroy(config);
-            return std.process.cleanExit();
+            return std.process.cleanExit(v.io.get());
         },
         .version => {
-            var stdout = std.fs.File.stdout().writer(&.{});
+            var stdout = std.Io.File.stdout().writerStreaming(v.io.get(), &.{});
             try stdout.interface.print("{s}\n", .{v.build_config.version});
             config.deinit(allocator);
             allocator.destroy(config);
-            return std.process.cleanExit();
+            return std.process.cleanExit(v.io.get());
         },
         else => {},
     }
@@ -153,7 +156,7 @@ fn run(allocator: Allocator, main_arena: Allocator) !void {
     switch (config.mode) {
         .serve => |opts| {
             log.debug(.app, "startup", .{ .mode = "serve", .snapshot = app.snapshot.fromEmbedded() });
-            const address = std.net.Address.parseIp(opts.host, opts.port) catch |err| {
+            const address = v.net.Address.parseIp(opts.host, opts.port) catch |err| {
                 log.fatal(.app, "invalid server address", .{ .err = err, .host = opts.host, .port = opts.port });
                 return config.printUsageAndExit(false);
             };
@@ -202,8 +205,8 @@ fn run(allocator: Allocator, main_arena: Allocator) !void {
                 .dump_html_file = opts.dump_html_file,
             };
 
-            var stdout = std.fs.File.stdout();
-            var writer = stdout.writer(&.{});
+            const stdout = std.Io.File.stdout();
+            var writer = stdout.writerStreaming(v.io.get(), &.{});
             if (opts.dump != null) {
                 fetch_opts.writer = &writer.interface;
             }
@@ -238,7 +241,7 @@ fn run(allocator: Allocator, main_arena: Allocator) !void {
 
             var cdp_server: ?*v.Server = null;
             if (opts.cdp_port) |port| {
-                const address = std.net.Address.parseIp("127.0.0.1", port) catch |err| {
+                const address = v.net.Address.parseIp("127.0.0.1", port) catch |err| {
                     log.fatal(.mcp, "invalid cdp address", .{ .err = err, .port = port });
                     return;
                 };
@@ -248,7 +251,7 @@ fn run(allocator: Allocator, main_arena: Allocator) !void {
             defer if (cdp_server) |s| s.deinit();
 
             if (opts.port) |port| {
-                const address = std.net.Address.parseIp(opts.host, port) catch |err| {
+                const address = v.net.Address.parseIp(opts.host, port) catch |err| {
                     log.fatal(.mcp, "invalid MCP HTTP address", .{
                         .err = err,
                         .host = opts.host,
@@ -275,7 +278,7 @@ fn run(allocator: Allocator, main_arena: Allocator) !void {
 }
 
 const FetchTerminator = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: v.sync.Mutex = .{},
     browser: ?*v.Browser = null,
     requested: bool = false,
 
@@ -344,7 +347,7 @@ fn fetchThread(app: *App, ft: *FetchTerminator, url: [:0]const u8, fetch_opts: v
 fn mcpThread(allocator: std.mem.Allocator, app: *App) void {
     defer app.network.stop();
 
-    var stdout = std.fs.File.stdout().writer(&.{});
+    var stdout = std.Io.File.stdout().writerStreaming(v.io.get(), &.{});
     var mcp_server: *v.mcp.Server = v.mcp.Server.init(allocator, app, &stdout.interface) catch |err| {
         log.fatal(.mcp, "mcp init error", .{ .err = err });
         return;
@@ -352,7 +355,7 @@ fn mcpThread(allocator: std.mem.Allocator, app: *App) void {
     defer mcp_server.deinit();
 
     var stdin_buf: [64 * 1024]u8 = undefined;
-    var stdin = std.fs.File.stdin().reader(&stdin_buf);
+    var stdin = std.Io.File.stdin().readerStreaming(v.io.get(), &stdin_buf);
     v.mcp.router.processRequests(mcp_server, &stdin.interface) catch |err| {
         log.fatal(.mcp, "mcp error", .{ .err = err });
     };

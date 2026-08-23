@@ -13,7 +13,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
-const posix = std.posix;
+const posix = @import("../../support/posix.zig");
+const net = @import("../../support/net.zig");
+const runtime_io = @import("../../support/io.zig");
 const builtin = @import("builtin");
 
 const log = @import("../../support/log.zig");
@@ -148,7 +150,7 @@ fn startImpl(self: *WebSocketClient, url: [:0]const u8, opts: StartOpts) !void {
         // Never fall back to a direct target socket when a proxy route was
         // requested. That would leak traffic outside the browser context.
         if (opts.proxy != null or err != error.ConnectionRefused or !isLocalhostHostname(hostname)) return err;
-        const v4 = std.net.Address.parseIp("127.0.0.1", port) catch return err;
+        const v4 = net.Address.parseIp("127.0.0.1", port) catch return err;
         if (opts.ip_filter) |filter| {
             if (filter.isBlockedAddress(v4)) return error.ConnectionRefused;
         }
@@ -221,10 +223,13 @@ fn buildProxyConnectRequest(
 ) ![]u8 {
     var request: std.ArrayList(u8) = .empty;
     errdefer request.deinit(allocator);
-    try request.writer(allocator).print(
+    const first_line = try std.fmt.allocPrint(
+        allocator,
         "CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\nProxy-Connection: Keep-Alive\r\n",
         .{ target_host, target_port, target_host, target_port },
     );
+    defer allocator.free(first_line);
+    try request.appendSlice(allocator, first_line);
 
     const encoded_user = URL.getUsername(proxy);
     if (encoded_user.len > 0) {
@@ -238,7 +243,9 @@ fn buildProxyConnectRequest(
         const encoded = try allocator.alloc(u8, encoded_len);
         defer allocator.free(encoded);
         _ = std.base64.standard.Encoder.encode(encoded, credentials);
-        try request.writer(allocator).print("Proxy-Authorization: Basic {s}\r\n", .{encoded});
+        const authorization = try std.fmt.allocPrint(allocator, "Proxy-Authorization: Basic {s}\r\n", .{encoded});
+        defer allocator.free(authorization);
+        try request.appendSlice(allocator, authorization);
     }
     try request.appendSlice(allocator, "\r\n");
     return request.toOwnedSlice(allocator);
@@ -426,11 +433,10 @@ pub fn poll(self: *WebSocketClient) !PollResult {
     const reader = &(self.reader orelse return .closed);
     const n = self.transportRead(reader.readBuf()) catch |err| switch (err) {
         error.WouldBlock => return self.pollResultAfterRead(0),
-        error.ConnectionResetByPeer, error.BrokenPipe, error.NotOpenForReading, error.TlsIoError => {
+        else => {
             self.state = .closed;
             return .closed;
         },
-        else => return err,
     };
 
     if (n == 0) {
@@ -460,7 +466,7 @@ pub fn queueFrame(self: *WebSocketClient, frame_type: FrameType, payload: []cons
     if (self.state != .open and self.state != .handshake) return error.InvalidState;
 
     var mask_key: [4]u8 = undefined;
-    std.crypto.random.bytes(&mask_key);
+    runtime_io.get().random(&mask_key);
 
     var header_buf: [14]u8 = undefined;
     const opcode: u8 = switch (frame_type) {
@@ -507,11 +513,10 @@ fn flushOutbound(self: *WebSocketClient) !void {
     while (self.outbound_pos < self.outbound.items.len) {
         const written = self.transportWrite(self.outbound.items[self.outbound_pos..]) catch |err| switch (err) {
             error.WouldBlock => return,
-            error.ConnectionResetByPeer, error.BrokenPipe, error.NotOpenForWriting, error.TlsIoError => {
+            else => {
                 self.state = .closed;
                 return;
             },
-            else => return err,
         };
         if (written == 0) {
             self.state = .closed;
@@ -641,15 +646,16 @@ fn sendHandshake(self: *WebSocketClient, url: [:0]const u8, origin: []const u8, 
     const search = URL.getSearch(url);
 
     var key_bytes: [16]u8 = undefined;
-    std.crypto.random.bytes(&key_bytes);
+    runtime_io.get().random(&key_bytes);
     var key_b64_buf: [32]u8 = undefined;
     const key_b64 = std.base64.standard.Encoder.encode(&key_b64_buf, &key_bytes);
 
-    var req = std.ArrayList(u8).empty;
-    defer req.deinit(self.allocator);
+    var req: std.Io.Writer.Allocating = .init(self.allocator);
+    defer req.deinit();
+    const writer = &req.writer;
 
     const host = URL.getHost(url);
-    try req.writer(self.allocator).print(
+    try writer.print(
         "GET {s}{s} HTTP/1.1\r\n" ++
             "Host: {s}\r\n" ++
             "Connection: Upgrade\r\n" ++
@@ -660,26 +666,26 @@ fn sendHandshake(self: *WebSocketClient, url: [:0]const u8, origin: []const u8, 
     );
 
     if (origin.len > 0 and !std.mem.eql(u8, origin, "null")) {
-        try req.writer(self.allocator).print("Origin: {s}\r\n", .{origin});
+        try writer.print("Origin: {s}\r\n", .{origin});
     }
     if (self.user_agent.len > 0) {
-        try req.writer(self.allocator).print("User-Agent: {s}\r\n", .{self.user_agent});
+        try writer.print("User-Agent: {s}\r\n", .{self.user_agent});
     }
 
     if (protocols.len > 0) {
         const joined = try std.mem.join(self.allocator, ", ", protocols);
         defer self.allocator.free(joined);
-        try req.writer(self.allocator).print("Sec-WebSocket-Protocol: {s}\r\n", .{joined});
+        try writer.print("Sec-WebSocket-Protocol: {s}\r\n", .{joined});
     }
 
     if (self.cookie_header) |cookies| {
         if (cookies.len > 0) {
-            try req.writer(self.allocator).print("Cookie: {s}\r\n", .{cookies});
+            try writer.print("Cookie: {s}\r\n", .{cookies});
         }
     }
 
-    try req.appendSlice(self.allocator, "\r\n");
-    try self.outbound.appendSlice(self.allocator, req.items);
+    try writer.writeAll("\r\n");
+    try self.outbound.appendSlice(self.allocator, req.written());
 }
 
 fn clientFrameHeader(buf: []u8, opcode: u8, payload_len: usize, mask_key: *[4]u8) []const u8 {
@@ -729,18 +735,18 @@ fn isLocalhostHostname(host: []const u8) bool {
     return std.ascii.eqlIgnoreCase(clean, "localhost") or std.mem.eql(u8, clean, "127.0.0.1");
 }
 
-fn connectTcp(address: std.net.Address) !posix.socket_t {
+fn connectTcp(address: net.Address) !posix.socket_t {
     const socket = try posix.socket(address.any.family, posix.SOCK.STREAM, 0);
     errdefer posix.close(socket);
     try posix.connect(socket, &address.any, address.getOsSockLen());
     return socket;
 }
 
-fn resolveAddress(allocator: Allocator, host: []const u8, port: u16) !std.net.Address {
+fn resolveAddress(allocator: Allocator, host: []const u8, port: u16) !net.Address {
     const clean = hostWithoutBrackets(host);
 
     // Literal IPv4/IPv6 (e.g. 127.0.0.1, ::1, [2001:db8::1]) bypass getaddrinfo.
-    if (std.net.Address.parseIp(clean, port)) |addr| return addr else |_| {}
+    if (net.Address.parseIp(clean, port)) |addr| return addr else |_| {}
 
     const c = @cImport({
         @cInclude("netdb.h");
@@ -766,18 +772,18 @@ fn resolveAddress(allocator: Allocator, host: []const u8, port: u16) !std.net.Ad
     // Prefer IPv4 over IPv6: WPT h2 servers often bind IPv4-only while getaddrinfo
     // may list ::1 before 127.0.0.1 for "localhost".
     var cur = res;
-    var fallback: ?std.net.Address = null;
+    var fallback: ?net.Address = null;
     while (cur) |ai| : (cur = ai.ai_next) {
         if (ai.ai_addr == null) continue;
         const sa: *posix.sockaddr = @ptrCast(@alignCast(ai.ai_addr));
-        const addr = std.net.Address.initPosix(@ptrCast(@alignCast(sa)));
+        const addr = net.Address.initPosix(@ptrCast(@alignCast(sa)));
         if (addr.any.family == posix.AF.INET) return addr;
         if (fallback == null) fallback = addr;
     }
 
     if (fallback) |addr| {
         if (addr.any.family == posix.AF.INET6 and isLocalhostHostname(host)) {
-            if (std.net.Address.parseIp("127.0.0.1", port)) |v4| return v4 else |_| {}
+            if (net.Address.parseIp("127.0.0.1", port)) |v4| return v4 else |_| {}
         }
         return addr;
     }

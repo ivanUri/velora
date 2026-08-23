@@ -1,4 +1,6 @@
 const std = @import("std");
+const runtime_io = @import("../support/io.zig");
+const datetime = @import("../support/datetime.zig");
 const Session = @import("../core/browser/Session.zig");
 const Config = @import("Config.zig");
 const cookies = @import("cookies.zig");
@@ -9,9 +11,10 @@ const Cookie = @import("../core/webapi/storage/Cookie.zig");
 const StoredCookie = @import("storage/Command.zig").StoredCookie;
 
 fn cookieFileUsable(path: []const u8) bool {
-    const file = std.fs.cwd().openFile(path, .{}) catch return false;
-    defer file.close();
-    const size = file.getEndPos() catch return false;
+    const io = runtime_io.get();
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    defer file.close(io);
+    const size = (file.stat(io) catch return false).size;
     return size > 2;
 }
 
@@ -60,7 +63,7 @@ pub fn saveExecutionCheckpoint(session: *Session, url: []const u8) void {
     const allocator = session.browser.app.allocator;
     const directory = session.browser.app.config.executionCheckpointDir() orelse return;
 
-    std.fs.cwd().makePath(directory) catch |err| {
+    std.Io.Dir.cwd().createDirPath(runtime_io.get(), directory) catch |err| {
         log.err(.app, "execution checkpoint directory", .{ .directory = directory, .err = err });
         return;
     };
@@ -79,7 +82,7 @@ pub fn saveExecutionCheckpoint(session: *Session, url: []const u8) void {
 
     const counts = storageCounts(session);
     Checkpoint.write(directory, .{
-        .createdAtMs = std.time.milliTimestamp(),
+        .createdAtMs = @intCast(datetime.milliTimestamp(.clock)),
         .url = url,
         .cookieCount = session.cookie_jar.cookies.items.len,
         .localStorageEntries = counts.local,
@@ -106,10 +109,10 @@ fn storageCounts(session: *const Session) StorageCounts {
 }
 
 fn checkpointFilesPresent(directory: []const u8, cookies_path: []const u8) bool {
-    std.fs.cwd().access(cookies_path, .{}) catch return false;
+    std.Io.Dir.cwd().access(runtime_io.get(), cookies_path, .{}) catch return false;
     var storage_path_buf: [512]u8 = undefined;
     const storage_path = session_persist.storageFilePath(directory, &storage_path_buf) orelse return false;
-    std.fs.cwd().access(storage_path, .{}) catch return false;
+    std.Io.Dir.cwd().access(runtime_io.get(), storage_path, .{}) catch return false;
     return true;
 }
 
@@ -190,7 +193,7 @@ fn loadSqliteState(session: *Session) !void {
         for (stored_cookies) |stored| stored.deinit(dto_allocator);
         dto_allocator.free(stored_cookies);
     }
-    const now = std.time.timestamp();
+    const now: i64 = @intCast(datetime.timestamp(.clock));
     for (stored_cookies) |stored| {
         if (stored.same_site > @intFromEnum(Cookie.SameSite.none)) continue;
         const cookie = try restoreCookie(session.cookie_jar.allocator, stored);
@@ -232,7 +235,7 @@ fn restoreCookie(backing_allocator: std.mem.Allocator, stored: StoredCookie) !Co
 fn ensureParentDir(path: []const u8) void {
     const parent = std.fs.path.dirname(path) orelse return;
     if (parent.len == 0) return;
-    std.fs.cwd().makePath(parent) catch {};
+    std.Io.Dir.cwd().createDirPath(runtime_io.get(), parent) catch {};
 }
 
 /// Persist cookies into runtime jar (CLI `--cookie-jar` or profile `Cookies.json`).

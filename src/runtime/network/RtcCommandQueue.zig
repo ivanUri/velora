@@ -14,11 +14,12 @@
 //! MPSC command queue: JS thread → WebRTC network thread.
 
 const std = @import("std");
+const net = @import("../../support/net.zig");
 
 /// Commands flowing from the JS thread to the WebRTC network thread.
 pub const RtcCommand = union(enum) {
     /// Begin ICE gathering after setLocalDescription.
-    start_gathering: ?std.net.Address,
+    start_gathering: ?net.Address,
     /// Parse remote SDP and extract ICE/DTLS credentials.
     set_remote_description: struct { sdp_buf: []u8 },
     /// Add a trickle ICE candidate string (a=candidate:... or candidate:...).

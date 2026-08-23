@@ -39,12 +39,16 @@ const max_pending_entries: usize = 4096;
 
 _rc: RC(u8) = .{},
 _arena: Allocator,
+// Owning frame registry. This is cleared before the frame releases its
+// registration reference, so a late V8 finalizer cannot leave a stale pointer
+// in Frame._intersection_observers.
+_registered_frame: ?*Frame = null,
 _callback: js.Function.Temp,
-_observing: std.ArrayList(*Element) = .{},
+_observing: std.ArrayList(*Element) = .empty,
 _root: ?*Element = null,
 _root_margin: []const u8 = "0px",
 _threshold: []const f64 = &.{0.0},
-_pending_entries: std.ArrayList(*IntersectionObserverEntry) = .{},
+_pending_entries: std.ArrayList(*IntersectionObserverEntry) = .empty,
 // Store the last intersection ratio, not only a boolean. Threshold arrays
 // must generate callbacks when an element crosses an intermediate ratio while
 // remaining intersecting.
@@ -111,6 +115,10 @@ pub fn init(callback: js.Function.Temp, options: ?ObserverInit, frame: *Frame) !
 }
 
 pub fn deinit(self: *IntersectionObserver, page: *Page) void {
+    if (self._registered_frame) |frame| {
+        frame.detachIntersectionObserver(self);
+        self._registered_frame = null;
+    }
     self._callback.release();
     for (self._pending_entries.items) |entry| {
         // These were never handed to v8, they do not have a corresponding
@@ -418,6 +426,14 @@ pub fn deliverEntries(self: *IntersectionObserver, frame: *Frame) !void {
         return;
     }
 
+    // The callback is allowed to call disconnect()/unobserve(), which can
+    // release the frame's registration reference while this dispatch is still
+    // on the stack. Keep an explicit in-flight reference so the observer (and
+    // its arena-backed callback/entries) cannot be destroyed until the JS
+    // callback has returned.
+    self.acquireRef();
+    defer self.releaseRef(frame._page);
+
     const entries = try self.takeRecords(frame);
     errdefer for (entries) |entry| entry.deinit(frame._page);
 
@@ -527,4 +543,8 @@ test "WebApi: IntersectionObserver" {
 
 test "WebApi: IntersectionObserver scroll checkpoint" {
     try testing.htmlRunner("regression/intersection_observer_scroll.html", .{});
+}
+
+test "WebApi: IntersectionObserver callback may disconnect itself" {
+    try testing.htmlRunner("regression/intersection_observer_callback_disconnect.html", .{});
 }

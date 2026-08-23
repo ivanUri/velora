@@ -39,7 +39,7 @@ pub fn encodePNG(buffer: *const PixelBuffer, allocator: std.mem.Allocator) ![]u8
         }
     };
 
-    var data_list = std.ArrayList(u8){};
+    var data_list: std.ArrayList(u8) = .empty;
     try data_list.ensureTotalCapacity(allocator, 4096); // Pre-allocate reasonable size
 
     var ctx = Context{

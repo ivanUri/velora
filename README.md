@@ -231,7 +231,7 @@ The project prioritizes runtime correctness and controllable browser behavior ov
 
 ## Requirements
 
-- Zig 0.15.2
+- Zig 0.16.0
 - V8
 - libcurl
 - Rust toolchain for required dependencies

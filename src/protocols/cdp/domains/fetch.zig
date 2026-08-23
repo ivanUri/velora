@@ -288,7 +288,8 @@ fn continueRequest(cmd: *CDP.Command) !void {
         var new_headers = try bc.cdp.browser.http_client.newHeaders();
         for (headers) |hdr| {
             defer buf.clearRetainingCapacity();
-            try std.fmt.format(buf.writer(cmd.arena), "{s}: {s}", .{ hdr.name, hdr.value });
+            const line = try std.fmt.allocPrint(cmd.arena, "{s}: {s}", .{ hdr.name, hdr.value });
+            try buf.appendSlice(cmd.arena, line);
             try buf.append(cmd.arena, 0);
             try new_headers.add(buf.items[0 .. buf.items.len - 1 :0]);
         }

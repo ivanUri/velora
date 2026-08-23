@@ -27,6 +27,7 @@
 // text bodies still work unchanged.
 
 const std = @import("std");
+const runtime_io = @import("../../../support/io.zig");
 const String = @import("../../../support/string.zig").String;
 
 const js = @import("../../js/js.zig");
@@ -70,7 +71,7 @@ pub const BodyInit = union(enum) {
             },
             .form_data => |fd| {
                 var rand_bytes: [10]u8 = undefined;
-                std.crypto.random.bytes(&rand_bytes);
+                runtime_io.get().random(&rand_bytes);
                 const hex = std.fmt.bytesToHex(rand_bytes, .lower);
 
                 var boundary: [24]u8 = undefined;

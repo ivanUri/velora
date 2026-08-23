@@ -13,6 +13,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = @import("../../support/assert.zig").assert;
 
 const App = @import("../../runtime/App.zig");
@@ -64,6 +65,14 @@ browser_context_id_gen: BrowserContextIdGen = .{},
 
 browser_context: ?BrowserContext,
 
+// A CDP connection owns one V8 isolate/browser worker. Keep a bounded
+// high-water budget for that worker and reclaim its heap between browser
+// contexts; this is the safe point where no client-visible Page is tearing down.
+worker_pages: u32 = 0,
+worker_rss_baseline_bytes: u64 = 0,
+worker_recycle_requested: bool = false,
+deferred_browser_context_dispose: bool = false,
+
 // Re-used arena for processing a message. We're assuming that we're getting
 // 1 message at a time.
 message_arena: std.heap.ArenaAllocator,
@@ -92,6 +101,7 @@ pub fn init(
         .browser = undefined,
         .allocator = allocator,
         .browser_context = null,
+        .worker_rss_baseline_bytes = processRssHighWaterBytes(),
         .frame_arena = std.heap.ArenaAllocator.init(allocator),
         .message_arena = std.heap.ArenaAllocator.init(allocator),
         .notification_arena = std.heap.ArenaAllocator.init(allocator),
@@ -115,6 +125,10 @@ fn persistSessionState(session: *Session, config: *const @import("../../runtime/
 }
 
 pub fn deinit(self: *CDP) void {
+    // The client commonly closes its websocket immediately after
+    // Target.disposeBrowserContext. Give the deferred safe-point cleanup one
+    // last chance before tearing down the connection-owned Browser.
+    self.finishDeferredBrowserContextDispose();
     if (self.browser_context) |*bc| {
         persistSessionState(bc.session, self.app.config);
         bc.deinit();
@@ -222,6 +236,7 @@ pub fn tick(self: *CDP) !bool {
     if (self.browser.session) |*session| {
         session.drainDeferredCommit();
     }
+    self.finishDeferredBrowserContextDispose();
 
     // Liveness is enforced by TCP keepalive (+ Linux TCP_USER_TIMEOUT)
     // configured in Network.acceptConnections; the wakeup lets V8 run or terminate.
@@ -391,15 +406,26 @@ fn isValidSessionId(self: *const CDP, input_session_id: []const u8) bool {
 }
 
 pub fn createBrowserContext(self: *CDP) ![]const u8 {
+    self.finishDeferredBrowserContextDispose();
     if (self.browser_context != null) {
         return error.AlreadyExists;
     }
+
+    // A disposed context is a safe boundary for reclaiming the worker heap.
+    // Keep the websocket and V8 isolate alive; real sites can still have
+    // callbacks from detached workers/blob URLs during isolate teardown.
+    if (self.worker_recycle_requested or self.workerRecycleNeeded()) {
+        try self.recycleWorker();
+    }
+
     const id = self.browser_context_id_gen.next();
 
     self.browser_context = @as(BrowserContext, undefined);
     const browser_context = &self.browser_context.?;
 
     try BrowserContext.init(browser_context, id, self);
+    self.worker_pages +|= 1;
+    self.worker_recycle_requested = self.workerRecycleNeeded();
     return id;
 }
 
@@ -411,13 +437,32 @@ pub fn disposeBrowserContext(self: *CDP, browser_context_id: []const u8) bool {
     // Reentrant teardown from a CDP message drained inside HttpClient.syncRequest.
     // Tearing down the browser context here would free Session/Page state
     // that the unwinding script-eval frame above us is about to dereference
-    // (see Session.removePage's matching guard). Defer cleanup to
-    // CDP.deinit at connection close, by which time eval has unwound.
-    if (bc.session.currentPage() != null) {
-        if (bc.session.activeIsEvaluating()) {
-            return true;
-        }
-    }
+    // (see Session.removePage's matching guard). Defer cleanup to the next
+    // safe CDP tick, by which time eval has unwound, while acknowledging the
+    // dispose request immediately.
+    // Always defer the actual free until the command dispatch has unwound.
+    // Target.closeTarget may have just dispatched frame_remove callbacks, and
+    // freeing the BrowserContext from the dispose command itself can still
+    // race those callbacks even when no script-eval flag is set.
+    self.deferred_browser_context_dispose = true;
+    return true;
+}
+
+fn finishDeferredBrowserContextDispose(self: *CDP) void {
+    if (!self.deferred_browser_context_dispose) return;
+    const bc = self.browser_context orelse {
+        self.deferred_browser_context_dispose = false;
+        return;
+    };
+    if (bc.session.activeIsEvaluating() or !bc.session.canDisposeContext()) return;
+    self.finishBrowserContextDispose();
+}
+
+fn finishBrowserContextDispose(self: *CDP) void {
+    const bc = &(self.browser_context orelse {
+        self.deferred_browser_context_dispose = false;
+        return;
+    });
     // Drain pending tasks while contexts are still registered and valid.
     self.browser.env.pumpMessageLoop();
     self.browser.runMicrotasks();
@@ -434,7 +479,52 @@ pub fn disposeBrowserContext(self: *CDP, browser_context_id: []const u8) bool {
     // across browser contexts: a large site would otherwise permanently pin
     // every body buffer in the long-lived CDP connection.
     _ = self.frame_arena.reset(.{ .retain_with_limit = 1024 * 512 });
-    return true;
+    self.worker_recycle_requested = self.workerRecycleNeeded();
+    self.deferred_browser_context_dispose = false;
+}
+
+fn workerRecycleNeeded(self: *const CDP) bool {
+    const max_pages = self.app.config.workerMaxPages();
+    if (max_pages > 0 and self.worker_pages >= max_pages) return true;
+
+    const max_rss_growth = self.app.config.workerMaxRssBytes();
+    if (max_rss_growth == 0) return false;
+
+    const rss = processRssHighWaterBytes();
+    return rss >= self.worker_rss_baseline_bytes and
+        rss - self.worker_rss_baseline_bytes >= max_rss_growth;
+}
+
+fn recycleWorker(self: *CDP) !void {
+    if (self.browser_context != null) return error.BrowserContextActive;
+
+    log.info(.app, "recycling CDP worker heap", .{
+        .pages = self.worker_pages,
+        .rss_high_water = processRssHighWaterBytes(),
+    });
+
+    // BrowserContext.deinit has already closed the Session and the deferred
+    // disposal predicate guarantees no page/transport callback still aliases
+    // its state. Now it is safe to force V8 to reclaim detached contexts and
+    // backing stores without tearing down the isolate itself.
+    self.browser.env.memoryPressureNotification(.critical);
+    self.browser.env.lowMemoryNotification();
+
+    _ = self.frame_arena.reset(.{ .retain_with_limit = 1024 * 512 });
+    _ = self.notification_arena.reset(.{ .retain_with_limit = 1024 * 64 });
+    _ = self.browser_context_arena.reset(.{ .retain_with_limit = 1024 * 64 });
+    self.worker_pages = 0;
+    self.worker_rss_baseline_bytes = processRssHighWaterBytes();
+    self.worker_recycle_requested = false;
+}
+
+fn processRssHighWaterBytes() u64 {
+    const usage = std.posix.getrusage(0);
+    const raw: u64 = if (usage.maxrss <= 0) 0 else @intCast(usage.maxrss);
+    return switch (builtin.os.tag) {
+        .macos, .ios, .watchos, .tvos => raw,
+        else => raw * 1024,
+    };
 }
 
 const SendEventOpts = struct {
@@ -1021,7 +1111,7 @@ pub const BrowserContext = struct {
         // + 10 for the max websocket header
         const message_len = msg.len + session_id.len + 1 + field.len + 10;
 
-        var buf: std.ArrayList(u8) = .{};
+        var buf: std.ArrayList(u8) = .empty;
         buf.ensureTotalCapacity(allocator, message_len) catch |err| {
             log.err(.cdp, "inspector buffer", .{ .err = err });
             return;

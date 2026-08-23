@@ -12,6 +12,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const datetime = @import("../../support/datetime.zig");
 
 const js = @import("../js/js.zig");
 const Page = @import("../browser/Page.zig");
@@ -54,7 +55,7 @@ pub fn init(
         break :blk "";
     };
 
-    const last_modified: i64 = if (opts.lastModified) |lm| @intFromFloat(lm) else std.time.milliTimestamp();
+    const last_modified: i64 = if (opts.lastModified) |lm| @intFromFloat(lm) else @intCast(datetime.milliTimestamp(.clock));
 
     const self = try page.factory.blob(arena, File{
         ._proto = undefined,

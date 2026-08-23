@@ -13,7 +13,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const posix = std.posix;
+const posix = @import("../../support/posix.zig");
+const net = @import("../../support/net.zig");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
@@ -207,7 +208,7 @@ pub fn Reader(comptime EXPECT_MASK: bool) type {
 
                     // not continuation, and not fin. It has to be the first message
                     // in a fragmented message.
-                    var fragments = Fragments{ .message = .{}, .type = message_type };
+                    var fragments = Fragments{ .message = .empty, .type = message_type };
                     try fragments.message.appendSlice(self.allocator, payload);
                     self.fragments = fragments;
                     continue :LOOP;
@@ -704,9 +705,9 @@ pub fn sendHttpError(self: *WsConnection, comptime status: u16, comptime body: [
     self.send(response) catch {};
 }
 
-pub fn getAddress(self: *WsConnection) !std.net.Address {
-    var address: std.net.Address = undefined;
-    var socklen: posix.socklen_t = @sizeOf(std.net.Address);
+pub fn getAddress(self: *WsConnection) !net.Address {
+    var address: net.Address = undefined;
+    var socklen: posix.socklen_t = @sizeOf(net.Address);
     try posix.getpeername(self.socket, &address.any, &socklen);
     return address;
 }

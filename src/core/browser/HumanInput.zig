@@ -1,4 +1,5 @@
 const std = @import("std");
+const Timer = @import("../../support/timer.zig");
 const Frame = @import("Frame.zig");
 const InputController = @import("InputController.zig");
 
@@ -15,7 +16,7 @@ pub const WheelOpts = struct {
 
 fn sleepMs(ms: u32) void {
     if (ms == 0) return;
-    std.Thread.sleep(ms * std.time.ns_per_ms);
+    Timer.sleepNanoseconds(ms * std.time.ns_per_ms);
 }
 
 fn bezier(t: f64, p0: f64, p1: f64, p2: f64, p3: f64) f64 {

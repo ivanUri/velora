@@ -53,6 +53,8 @@
 //!   - No mutex needed on RTCPeerConnection fields (JS thread owns them).
 
 const std = @import("std");
+const datetime = @import("../../../../support/datetime.zig");
+const net = @import("../../../../support/net.zig");
 const Allocator = std.mem.Allocator;
 
 const log = @import("../../../../support/log.zig");
@@ -197,7 +199,7 @@ handlers: Handlers,
 _offer_options: OfferOptions = .{},
 
 // STUN server address (parsed from config, sent to network thread)
-_stun_addr: ?std.net.Address,
+_stun_addr: ?net.Address,
 
 // Closed flag (atomic so drainEvents can check safely)
 _closed: std.atomic.Value(bool),
@@ -246,7 +248,7 @@ pub fn create(alloc: Allocator, config: Config) !*RTCPeerConnection {
     const thread = try WebRtcThread.create(alloc, event_queue, cmd_queue, thread_config);
     errdefer thread.destroy();
 
-    const now: u64 = @intCast(std.time.milliTimestamp());
+    const now = datetime.milliTimestamp(.monotonic);
 
     self.* = RTCPeerConnection{
         ._alloc = alloc,
@@ -716,7 +718,7 @@ fn buildSdpParams(self: *const RTCPeerConnection, setup: SdpBuilder.DtlsSetup) S
 // Private: STUN server parsing
 // ---------------------------------------------------------------------------
 
-fn parseFirstStunServer(alloc: Allocator, servers: []const IceServer) ?std.net.Address {
+fn parseFirstStunServer(alloc: Allocator, servers: []const IceServer) ?net.Address {
     for (servers) |srv| {
         const url = srv.url;
         const rest = if (std.mem.startsWith(u8, url, "stun:")) url[5..] else continue;
@@ -734,8 +736,8 @@ fn parseFirstStunServer(alloc: Allocator, servers: []const IceServer) ?std.net.A
     return null;
 }
 
-fn resolveStunAddress(alloc: Allocator, host: []const u8, port: u16) ?std.net.Address {
-    const parsed = std.net.Address.parseIp(host, port) catch null;
+fn resolveStunAddress(alloc: Allocator, host: []const u8, port: u16) ?net.Address {
+    const parsed = net.Address.parseIp(host, port) catch null;
     if (parsed) |addr| return addr;
 
     const c = @cImport({
@@ -764,7 +766,7 @@ fn resolveStunAddress(alloc: Allocator, host: []const u8, port: u16) ?std.net.Ad
         if (ai.ai_family != c.AF_INET or ai.ai_addr == null) continue;
         const sin: *std.posix.sockaddr.in = @ptrCast(@alignCast(ai.ai_addr));
         const ip: [4]u8 = @bitCast(sin.addr);
-        return std.net.Address.initIp4(ip, port);
+        return net.Address.initIp4(ip, port);
     }
     return null;
 }

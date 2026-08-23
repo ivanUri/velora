@@ -113,8 +113,8 @@ _on_unhandled_rejection: ?JS.Function.Global = null,
 _on_message: ?JS.Function.Global = null,
 _on_messageerror: ?JS.Function.Global = null,
 _on_connect: ?JS.Function.Global = null,
-_pending_undelivered: std.ArrayListUnmanaged(PendingInboundMessage) = .{},
-_pending_connect_ports: std.ArrayList(*MessagePort) = .{},
+_pending_undelivered: std.ArrayListUnmanaged(PendingInboundMessage) = .empty,
+_pending_connect_ports: std.ArrayList(*MessagePort) = .empty,
 _debug_next_message_id: u64 = 1,
 
 _timers: Timers = .{},
@@ -448,7 +448,7 @@ fn releasePendingUndelivered(self: *WorkerGlobalScope) void {
         pending.data.release();
     }
     self._pending_undelivered.deinit(self.arena);
-    self._pending_undelivered = .{};
+    self._pending_undelivered = .empty;
 }
 
 pub fn getOnMessageError(self: *const WorkerGlobalScope) ?JS.Function.Global {
@@ -920,7 +920,7 @@ fn decodeImportScriptDataUrlBody(allocator: Allocator, url: []const u8) ![]const
         for (data) |c| {
             if (!std.ascii.isWhitespace(c)) try stripped.append(allocator, c);
         }
-        const trimmed = std.mem.trimRight(u8, stripped.items, "=");
+        const trimmed = std.mem.trimEnd(u8, stripped.items, "=");
         if (trimmed.len % 4 == 1) return error.NetworkError;
         const decoded_size = std.base64.standard_no_pad.Decoder.calcSizeForSlice(trimmed) catch return error.NetworkError;
         const buffer = try allocator.alloc(u8, decoded_size);

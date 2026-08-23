@@ -1,4 +1,5 @@
 const std = @import("std");
+const runtime_io = @import("../support/io.zig");
 const Session = @import("../core/browser/Session.zig");
 const log = @import("../support/log.zig");
 
@@ -25,7 +26,7 @@ pub fn loadStorageDir(session: *Session, dir: []const u8) void {
 }
 
 pub fn saveStorageDir(session: *Session, dir: []const u8) void {
-    std.fs.cwd().makePath(dir) catch {};
+    std.Io.Dir.cwd().createDirPath(runtime_io.get(), dir) catch {};
     var path_buf: [512]u8 = undefined;
     const path = storageFilePath(dir, &path_buf) orelse return;
     saveStorage(session, path);
@@ -46,7 +47,7 @@ fn _loadStorage(session: *Session, path: []const u8) !void {
     const arena = try session.getArena(.medium, "session_persist.load");
     defer session.releaseArena(arena);
 
-    const content = std.fs.cwd().readFileAlloc(arena, path, 4 * 1024 * 1024) catch |err| switch (err) {
+    const content = std.Io.Dir.cwd().readFileAlloc(runtime_io.get(), path, arena, .limited(4 * 1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
@@ -111,16 +112,18 @@ fn _saveStorage(session: *Session, path: []const u8) !void {
     }
 
     if (std.fs.path.dirname(path)) |parent| {
-        try std.fs.cwd().makePath(parent);
+        try std.Io.Dir.cwd().createDirPath(runtime_io.get(), parent);
     }
 
+    const io = runtime_io.get();
     var buf: [8192]u8 = undefined;
-    var atomic_file = try std.fs.cwd().atomicFile(path, .{ .make_path = true, .write_buffer = &buf });
-    defer atomic_file.deinit();
-    try std.json.Stringify.value(origins.items, .{}, &atomic_file.file_writer.interface);
-    try atomic_file.file_writer.interface.writeByte('\n');
-    try atomic_file.flush();
-    try atomic_file.file_writer.file.sync();
-    try atomic_file.renameIntoPlace();
+    var atomic_file = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .make_path = true, .replace = true });
+    defer atomic_file.deinit(io);
+    var file_writer = atomic_file.file.writer(io, &buf);
+    try std.json.Stringify.value(origins.items, .{}, &file_writer.interface);
+    try file_writer.interface.writeByte('\n');
+    try file_writer.interface.flush();
+    try atomic_file.file.sync(io);
+    try atomic_file.replace(io);
     log.info(.app, "session_persist.saveStorage", .{ .path = path, .origins = origins.items.len });
 }

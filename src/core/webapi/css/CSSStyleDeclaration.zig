@@ -213,7 +213,7 @@ fn getInlineSystemFontFamily(element: *Element) ?[]const u8 {
         if (!std.ascii.eqlIgnoreCase(declaration.name, "font")) continue;
         var value = std.mem.trim(u8, declaration.value, " ");
         if (std.mem.endsWith(u8, value, "!important")) {
-            value = std.mem.trimRight(u8, value[0 .. value.len - "!important".len], " ");
+            value = std.mem.trimEnd(u8, value[0 .. value.len - "!important".len], " ");
         }
         if (resolveSystemFontKeyword(value)) |family| return family;
     }
@@ -779,7 +779,7 @@ fn collapseDuplicateValue(value: []const u8) ?[]const u8 {
     if (space_idx == 0 or space_idx >= value.len - 1) return null;
 
     const first = value[0..space_idx];
-    const rest = std.mem.trimLeft(u8, value[space_idx + 1 ..], " ");
+    const rest = std.mem.trimStart(u8, value[space_idx + 1 ..], " ");
 
     // Check if there's only one more value (no additional spaces)
     if (std.mem.indexOfScalar(u8, rest, ' ') != null) return null;

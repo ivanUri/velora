@@ -1,4 +1,5 @@
 const std = @import("std");
+const runtime_io = @import("../../support/io.zig");
 
 const App = @import("../../runtime/App.zig");
 const Server = @import("Server.zig");
@@ -76,7 +77,7 @@ pub fn create(self: *Self) Error![]const u8 {
     }
 
     var random: [16]u8 = undefined;
-    std.crypto.random.bytes(&random);
+    runtime_io.get().random(&random);
     const id = std.fmt.allocPrint(self.allocator, "{x}", .{random}) catch return error.OutOfMemory;
     errdefer self.allocator.free(id);
 

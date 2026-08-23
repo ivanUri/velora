@@ -1,4 +1,6 @@
 const std = @import("std");
+const net = @import("../../support/net.zig");
+const runtime_io = @import("../../support/io.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -14,12 +16,13 @@ const supported_schemes = [_][]const u8{"http://"};
 /// lifetime of the browser process. Selection is performed once during Config
 /// initialization; requests never rotate proxies mid-session.
 pub fn loadRandom(allocator: Allocator, path: []const u8) ![:0]u8 {
-    const bytes = try std.fs.cwd().readFileAlloc(allocator, path, 8 * 1024 * 1024);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(runtime_io.get(), path, allocator, .limited(8 * 1024 * 1024));
     defer allocator.free(bytes);
 
     const count = try validateAndCount(allocator, bytes);
     if (count == 0) return Error.EmptyProxyFile;
-    return selectAt(allocator, bytes, std.crypto.random.uintLessThan(usize, count));
+    var random_source = std.Random.IoSource{ .io = runtime_io.get() };
+    return selectAt(allocator, bytes, random_source.interface().uintLessThan(usize, count));
 }
 
 fn validateAndCount(allocator: Allocator, bytes: []const u8) !usize {
@@ -105,17 +108,17 @@ pub fn redactedEndpoint(proxy: []const u8) []const u8 {
 /// literal. This is deliberately not a DNS lookup: a gateway hostname may
 /// rotate to an exit address unrelated to the gateway itself. Callers must
 /// fail closed when the actual exit identity is unknown.
-pub fn literalHostAddress(proxy: []const u8) ?std.net.Address {
+pub fn literalHostAddress(proxy: []const u8) ?net.Address {
     const endpoint = redactedEndpoint(proxy);
     if (endpoint.len == 0) return null;
 
     if (endpoint[0] == '[') {
         const end = std.mem.indexOfScalar(u8, endpoint, ']') orelse return null;
-        return std.net.Address.parseIp(endpoint[1..end], 0) catch null;
+        return net.Address.parseIp(endpoint[1..end], 0) catch null;
     }
 
     const colon = std.mem.lastIndexOfScalar(u8, endpoint, ':') orelse return null;
-    return std.net.Address.parseIp(endpoint[0..colon], 0) catch null;
+    return net.Address.parseIp(endpoint[0..colon], 0) catch null;
 }
 
 fn containsAsciiWhitespace(value: []const u8) bool {
@@ -168,8 +171,9 @@ test "proxy pool redacts credentials from diagnostics" {
 test "proxy pool exposes only literal endpoint identity" {
     const ipv4 = literalHostAddress("http://user:pass@103.99.2.15:20211") orelse
         return error.MissingLiteralProxyIp;
-    const expected = try std.net.Address.parseIp("103.99.2.15", 0);
-    try std.testing.expect(ipv4.eql(expected));
+    const expected = try net.Address.parseIp("103.99.2.15", 0);
+    try std.testing.expectEqual(expected.in.addr, ipv4.in.addr);
+    try std.testing.expectEqual(expected.in.port, ipv4.in.port);
     try std.testing.expect(literalHostAddress("http://gateway.example:8080") == null);
 }
 

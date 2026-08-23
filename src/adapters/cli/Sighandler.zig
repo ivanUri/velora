@@ -31,7 +31,7 @@ sigset: std.posix.sigset_t = undefined,
 handle_thread: ?std.Thread = null,
 
 attempt: u32 = 0,
-mutex: std.Thread.Mutex = .{},
+mutex: v.sync.Mutex = .{},
 listeners: std.ArrayList(Listener) = .empty,
 
 pub const Listener = struct {
@@ -121,7 +121,7 @@ fn sighandle(self: *SigHandler) noreturn {
         }
 
         switch (sig) {
-            std.posix.SIG.INT, std.posix.SIG.TERM => {
+            @intFromEnum(std.posix.SIG.INT), @intFromEnum(std.posix.SIG.TERM) => {
                 self.mutex.lock();
                 if (self.attempt > 1) {
                     self.mutex.unlock();
@@ -136,7 +136,7 @@ fn sighandle(self: *SigHandler) noreturn {
                 self.mutex.unlock();
                 continue;
             },
-            std.posix.SIG.ALRM => {
+            @intFromEnum(std.posix.SIG.ALRM) => {
                 // Deadline tripped (e.g. --terminate-ms). Run the same listeners,
                 // but don't bump `attempt` — a subsequent ctrl-c should still get
                 // the normal first-attempt graceful path before hard-exiting.
