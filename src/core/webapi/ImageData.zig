@@ -72,10 +72,22 @@ pub fn init(
     size, overflown = @mulWithOverflow(size, 4);
     if (overflown == 1) return error.IndexSizeError;
 
+    // Canvas constructors can run in a dedicated worker. In that realm the
+    // owning Frame is still used for object allocation, but `frame.js.local`
+    // is intentionally null because the active JS local belongs to the
+    // worker Context. Resolve the current isolate Context instead of
+    // dereferencing the page local (which caused a null-pointer SIGSEGV while
+    // captcha workers constructed ImageData inside Promise callbacks).
+    const local = frame.js.local orelse blk: {
+        const ctx = js.Context.fromIsolate(frame._session.browser.env.isolate) orelse
+            return error.InvalidStateError;
+        break :blk ctx[0].local orelse return error.InvalidStateError;
+    };
+
     return frame._factory.create(ImageData{
         ._width = width,
         ._height = height,
-        ._data = try frame.js.local.?.createTypedArray(.uint8_clamped, size).persist(),
+        ._data = try local.createTypedArray(.uint8_clamped, size).persist(),
     });
 }
 

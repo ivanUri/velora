@@ -1802,7 +1802,19 @@ pub const Scope = struct {
     local: Local,
     handle_scope: js.HandleScope,
 
+    // A Zig->V8 scope is also an active execution scope. Keep it visible on
+    // Context while it is alive so nested event dispatch reuses this Local
+    // instead of opening a second context/handle scope and checkpointing
+    // microtasks re-entrantly. This is separate from Context.local, whose
+    // nullness is used by existing callers to determine scope ownership.
+    ctx: ?*Context = null,
+    prev_active_scope: ?*const Local = null,
+
     pub fn deinit(self: *Scope) void {
+        if (self.ctx) |ctx| {
+            ctx.active_scope = self.prev_active_scope;
+            self.ctx = null;
+        }
         v8.v8__Context__Exit(self.local.handle);
         self.handle_scope.deinit();
     }

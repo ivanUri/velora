@@ -49,6 +49,10 @@ pub fn init(self: *Caller, v8_isolate: *v8.Isolate) bool {
 }
 
 fn throwDetachedError(isolate: *v8.Isolate) void {
+    var hs: js.HandleScope = undefined;
+    hs.initWithIsolateHandle(isolate);
+    defer hs.deinit();
+
     const message = "Cannot execute in detached context (e.g., navigated-away iframe)";
     const v8_message = v8.v8__String__NewFromUtf8(isolate, message.ptr, v8.kNormal, @intCast(message.len));
     const js_exception = v8.v8__Exception__Error(v8_message);

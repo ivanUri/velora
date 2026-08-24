@@ -549,7 +549,8 @@ fn loadInitialScript(self: *Worker, script: []const u8) !void {
         // change V8's entered-context stack, leaving the outer Env guard to exit
         // a context that is no longer entered. Install only a HandleScope/local.
         const ctx = self._worker_scope.js;
-        var installed = js.Context.InstalledLocal.install(ctx);
+        var installed: js.Context.InstalledLocal = undefined;
+        installed.install(ctx);
         defer installed.deinit(ctx);
         const ls = &installed.scope;
 
@@ -682,7 +683,8 @@ fn loadInitialModule(self: *Worker, script: []const u8) !void {
     {
         // Same scheduler-entry invariant as classic worker evaluation above.
         const ctx = self._worker_scope.js;
-        var installed = js.Context.InstalledLocal.install(ctx);
+        var installed: js.Context.InstalledLocal = undefined;
+        installed.install(ctx);
         defer installed.deinit(ctx);
         const ls = &installed.scope;
 

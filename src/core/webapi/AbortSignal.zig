@@ -410,7 +410,8 @@ const TimeoutCallback = struct {
 
         // Timer callbacks are Zig-initiated; install ctx.local so helpers that read
         // exec.context.local (createTimeoutError, abort dispatch) see a live Local.
-        var installed = Context.InstalledLocal.install(self.exec.context);
+        var installed: Context.InstalledLocal = undefined;
+        installed.install(self.exec.context);
         defer installed.deinit(self.exec.context);
 
         const reason = try createTimeoutReason(self.exec);

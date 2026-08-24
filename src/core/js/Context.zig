@@ -120,6 +120,12 @@ terminal_resources: std.ArrayList(TerminalResource) = .empty,
 // context.localScope
 local: ?*const js.Local = null,
 
+// The Local.Scope currently entered by Zig. This is intentionally separate
+// from `local`: callers use `local == null` to decide whether they own the
+// scope lifetime, while dispatch only needs to know whether it can reuse an
+// already-entered context and HandleScope.
+active_scope: ?*const js.Local = null,
+
 // Internal exception helpers are persistent handles, not globalThis
 // properties. Exposing engine plumbing as __koko* own properties is both a
 // web-compat violation and a high-signal automation fingerprint.
@@ -245,7 +251,8 @@ const ModuleEntry = struct {
 };
 
 pub fn fromC(c_context: *const v8.Context) ?*Context {
-    return @ptrCast(@alignCast(v8.v8__Context__GetAlignedPointerFromEmbedderData(c_context, 1)));
+    const ptr = v8.v8__Context__GetAlignedPointerFromEmbedderData(c_context, 1) orelse return null;
+    return @ptrCast(@alignCast(ptr));
 }
 
 /// Returns the Context and v8::Context for the given isolate.
@@ -253,13 +260,13 @@ pub fn fromC(c_context: *const v8.Context) ?*Context {
 /// falls back to the incumbent context (the calling context).
 /// Returns null if neither context has a valid Context struct (both were destroyed).
 pub fn fromIsolate(isolate: js.Isolate) ?struct { *Context, *const v8.Context } {
-    const v8_context = v8.v8__Isolate__GetCurrentContext(isolate.handle).?;
+    const v8_context = v8.v8__Isolate__GetCurrentContext(isolate.handle) orelse return null;
     if (fromC(v8_context)) |ctx| {
         return .{ ctx, v8_context };
     }
     // The current context's Context struct has been freed (e.g., iframe navigated away).
     // Fall back to the incumbent context (the calling context).
-    const v8_incumbent = v8.v8__Isolate__GetIncumbentContext(isolate.handle).?;
+    const v8_incumbent = v8.v8__Isolate__GetIncumbentContext(isolate.handle) orelse return null;
     const ctx = fromC(v8_incumbent) orelse return null;
     return .{ ctx, v8_incumbent };
 }
@@ -393,8 +400,11 @@ pub const InstalledLocal = struct {
     scope: js.Local.Scope,
     prev: ?*const js.Local,
 
-    pub fn install(ctx: *Context) InstalledLocal {
-        var self: InstalledLocal = .{ .scope = undefined, .prev = ctx.local };
+    /// Initialize in caller-owned storage. HandleScope stores its own address
+    /// inside V8, so returning an initialized InstalledLocal by value would
+    /// leave V8 pointing at the temporary struct used during `install`.
+    pub fn install(self: *InstalledLocal, ctx: *Context) void {
+        self.* = .{ .scope = undefined, .prev = ctx.local };
         js.HandleScope.init(&self.scope.handle_scope, ctx.isolate);
         const handle_ptr = v8.v8__Global__Get(&ctx.handle, ctx.isolate.handle).?;
         self.scope.local = .{
@@ -404,7 +414,6 @@ pub const InstalledLocal = struct {
             .call_arena = ctx.call_arena,
         };
         ctx.local = &self.scope.local;
-        return self;
     }
 
     pub fn deinit(self: *InstalledLocal, ctx: *Context) void {
@@ -434,6 +443,15 @@ pub fn tryLocalScope(self: *Context, ls: *js.Local.Scope) bool {
         .handle = local_v8_context,
         .call_arena = self.call_arena,
     };
+
+    // Publish the scope for the lifetime of the HandleScope. Event dispatch
+    // can be entered from these Zig-owned callbacks (not only from a V8
+    // Caller), so the Context needs a separate active-scope marker. This
+    // prevents dispatchDirect from creating a nested Local.Scope and running
+    // a nested microtask checkpoint while a Worker message callback is active.
+    ls.ctx = self;
+    ls.prev_active_scope = self.active_scope;
+    self.active_scope = &ls.local;
     return true;
 }
 
@@ -1319,7 +1337,13 @@ pub fn enter(self: *Context, hs: *js.HandleScope) ?Entered {
     const isolate = self.isolate;
     js.HandleScope.init(hs, isolate);
 
-    const handle_ptr = v8.v8__Global__Get(&self.handle, isolate.handle) orelse return null;
+    const handle_ptr = v8.v8__Global__Get(&self.handle, isolate.handle) orelse {
+        // `hs` is owned by the caller and must not remain live after a failed
+        // context lookup.  Returning without destroying it leaks the V8 scope
+        // and leaves subsequent callbacks with an invalid scope stack.
+        hs.deinit();
+        return null;
+    };
 
     const original = self.global.getJs();
     self.global.setJs(self);

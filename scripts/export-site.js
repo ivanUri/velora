@@ -16,7 +16,7 @@ const CONFIG = {
   terminateMs: 30_000,
   terminateGraceMs: 2_000,
   killGraceMs: 2_000,
-  maxSites: 5,
+  maxSites: 100,
 };
 
 function stripScriptElements(html) {

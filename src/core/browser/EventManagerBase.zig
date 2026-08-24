@@ -411,15 +411,15 @@ pub fn dispatchDirect(
         event._dispatch_target = target;
     }
 
-    // When dispatch runs inside a V8 API callback, Caller already installed
-    // ctx.local and the context is entered. A second localScope/deinit pair
-    // trips V8's "Cannot exit non-entered context" check on return. Draining
-    // microtasks in that case can re-enter event handlers and imbalance the
-    // context stack — the outer API caller owns the checkpoint.
-    const nested_in_api = ctx.local != null;
+    // Reuse either a V8->Zig Caller scope or a Zig-owned Local.Scope already
+    // entered by the current task. A second localScope/deinit pair trips V8's
+    // context stack, and a nested microtask checkpoint can re-enter handlers
+    // while the outer event is still dispatching.
+    const active_local = ctx.local orelse ctx.active_scope;
+    const nested_in_api = active_local != null;
     var owned_scope: js.Local.Scope = undefined;
     const local: *const js.Local = blk: {
-        if (ctx.local) |active| break :blk active;
+        if (active_local) |active| break :blk active;
         // Page teardown may abort XHR after destroyContext; skip events if dead.
         if (!ctx.tryLocalScope(&owned_scope)) return;
         break :blk &owned_scope.local;
